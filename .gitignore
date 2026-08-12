@@ -1,0 +1,41 @@
+# ── Learning material ────────────────────────────────────────────────────────
+# Roadmap, exercises, interview prep, and raw measurement notes. These are
+# study aids for me, not part of the software. Benchmark *results* that back a
+# claim get promoted into README.md; the working notes stay here.
+_learning/
+
+# ── Dependencies & build output ──────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+coverage/
+*.local
+
+# ── Tooling caches ───────────────────────────────────────────────────────────
+.vite/
+.eslintcache
+*.tsbuildinfo
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Editor & OS ──────────────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ── Environment ──────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local

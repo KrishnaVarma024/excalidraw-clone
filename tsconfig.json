@@ -1,0 +1,50 @@
+{
+  "compilerOptions": {
+    /* ---- Target & module system -------------------------------------- */
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "useDefineForClassFields": true,
+
+    /* Vite transpiles file-by-file and never type-checks, so `import type`
+       must be explicit or the elided import can break at runtime. */
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+
+    /* `tsc` is a type-checker here, not a compiler — Vite emits the bundle. */
+    "noEmit": true,
+
+    /* ---- Correctness ------------------------------------------------- */
+    "strict": true,
+
+    /* Turns `points[i]` into `Point | undefined`. Painful for about a day,
+       then it starts catching real off-by-one bugs in the geometry code.
+       This project is ~40% array indexing (point lists, quadtree children,
+       dirty-rect lists) so the trade is worth it. */
+    "noUncheckedIndexedAccess": true,
+
+    /* `{ a?: number }` and `{ a: number | undefined }` stop being the same
+       type. Matters for element patches: `{ angle: undefined }` should not
+       be a legal way to say "leave angle alone". */
+    "exactOptionalPropertyTypes": true,
+
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "forceConsistentCasingInFileNames": true,
+
+    /* ---- Paths ------------------------------------------------------- */
+    "baseUrl": ".",
+    "paths": {
+      "@engine/*": ["src/engine/*"],
+      "@react/*": ["src/react/*"]
+    }
+  },
+  "include": ["src", "tests", "vite.config.ts", "eslint.config.js"]
+}
