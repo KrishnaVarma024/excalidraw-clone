@@ -52,9 +52,14 @@ canvas {
   height: 100%;
 }
 
+/* The container stretches; the <canvas> inside it gets an explicit pixel size
+   from JS. A canvas is a replaced element, so `inset: 0` would NOT stretch it —
+   it would size itself from its width/height attributes and feed back into the
+   ResizeObserver. See the note in CanvasHost.tsx. */
 .canvas-host {
   position: absolute;
   inset: 0;
+  overflow: hidden;
 }
 
 .badge {
@@ -76,4 +81,103 @@ canvas {
 .badge strong {
   color: var(--fg);
   font-weight: 600;
+}
+
+.badge kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg);
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg);
+}
+
+/* ── Zoom controls ────────────────────────────────────────────────────────── */
+
+.zoom-controls {
+  position: absolute;
+  left: 16px;
+  top: 16px;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  overflow: hidden;
+}
+
+.zoom-controls button {
+  min-width: 34px;
+  height: 34px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.zoom-controls button:hover:not(:disabled) {
+  background: rgba(127, 127, 140, 0.14);
+}
+
+.zoom-controls button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Visible focus ring — the canvas itself is not keyboard-navigable, so these
+   buttons are the only way in for a keyboard user. Removing the outline here
+   would strand them. */
+.zoom-controls button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.zoom-controls .zoom-reset {
+  min-width: 62px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+/* ── Stats overlay ────────────────────────────────────────────────────────── */
+
+.stats {
+  position: absolute;
+  right: 16px;
+  top: 16px;
+  min-width: 172px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  pointer-events: none;
+}
+
+.stats-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.stats-label {
+  color: var(--muted);
+}
+
+.stats-value {
+  color: var(--fg);
+  /* Tabular figures stop the panel jittering as digits change width — the
+     overlay is meant to be readable while things are moving. */
+  font-variant-numeric: tabular-nums;
 }
