@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { Engine, FrameInfo } from '@engine/Engine';
+import { STAGE_NAMES, type StageName } from '@engine/util/perf';
 
 interface Props {
   engine: Engine;
@@ -26,10 +27,23 @@ interface Props {
  * The rule of thumb: if a human cannot read it at the rate it changes, it does
  * not belong in the render tree.
  *
- * From Phase 3 this becomes the primary instrument for the whole project. The
- * before/after numbers that justify the quadtree and the dirty-rectangle
- * renderer are read off exactly these fields — so `drawn / total` and
- * `cache hit` matter as much as the timings.
+ * ── What Phase 3 adds, and why it is the point of the phase ─────────────────
+ *
+ * A single frame time is not actionable. "The frame takes 40 ms" tells you there
+ * is a problem; it does not tell you which of four things caused it. The stage
+ * breakdown does, and the two stages below scale differently on purpose:
+ *
+ *     cull  is O(total)   — grows with everything that exists
+ *     draw  is O(visible) — grows with what fits on the screen
+ *
+ * Zoom into a corner of a 50,000-element scene and `draw` goes to nearly zero
+ * while `cull` does not move at all. That divergence is the entire argument for
+ * Phase 4's quadtree, and you cannot see it from one number.
+ *
+ * `tested` is the same argument without a clock attached: it is the count of
+ * elements the cull examined. It is deterministic, it reads identically on a
+ * fast laptop and a throttled CI box, and Phase 4 is done when it stops tracking
+ * `total`.
  */
 export function StatsOverlay({ engine }: Props) {
   const fps = useRef<HTMLSpanElement>(null);
@@ -37,9 +51,20 @@ export function StatsOverlay({ engine }: Props) {
   const p95 = useRef<HTMLSpanElement>(null);
   const zoom = useRef<HTMLSpanElement>(null);
   const drawn = useRef<HTMLSpanElement>(null);
+  const tested = useRef<HTMLSpanElement>(null);
   const cache = useRef<HTMLSpanElement>(null);
   const grid = useRef<HTMLSpanElement>(null);
   const idle = useRef<HTMLSpanElement>(null);
+
+  // One ref per stage, created once. `Record<StageName, …>` rather than an
+  // index signature, so adding a stage to the union is a compile error here
+  // rather than a silently missing row.
+  const stageRefs = useRef<Record<StageName, HTMLSpanElement | null>>({
+    cull: null,
+    grid: null,
+    draw: null,
+    interactive: null,
+  });
 
   useEffect(() => {
     const write = (el: HTMLSpanElement | null, text: string) => {
@@ -53,11 +78,23 @@ export function StatsOverlay({ engine }: Props) {
       write(p50.current, `${info.stats.p50.toFixed(2)} ms`);
       write(p95.current, `${info.stats.p95.toFixed(2)} ms`);
       write(zoom.current, `${(info.zoom * 100).toFixed(1)}%`);
-      // drawn / total is the culling ratio — the number Phase 4 improves.
-      write(drawn.current, `${info.render.drawn} / ${info.render.total}`);
+      // drawn / total is the culling ratio — what the viewport saved you.
+      write(
+        drawn.current,
+        `${info.render.drawn.toLocaleString()} / ${info.render.total.toLocaleString()}`,
+      );
+      // tested is what the cull cost you. Equal to total under a linear scan;
+      // Phase 4 is finished when this stops growing with the scene.
+      write(tested.current, info.render.tested.toLocaleString());
       write(cache.current, `${(info.render.cacheHitRate * 100).toFixed(0)}%`);
       write(grid.current, String(info.render.gridLines));
       write(idle.current, String(info.idleFrames));
+
+      // No unit suffix here — the section header carries it, which keeps four
+      // numbers vertically aligned and the panel narrow.
+      for (const stage of STAGE_NAMES) {
+        write(stageRefs.current[stage], info.stages[stage].toFixed(2));
+      }
     };
 
     return engine.addFrameListener(onFrame);
@@ -65,14 +102,37 @@ export function StatsOverlay({ engine }: Props) {
 
   return (
     <div className="stats" aria-hidden="true">
+      <div className="stats-section">frame</div>
       <Row label="renders/s" spanRef={fps} />
-      <Row label="frame p50" spanRef={p50} />
-      <Row label="frame p95" spanRef={p95} />
+      <Row label="p50" spanRef={p50} />
+      <Row label="p95" spanRef={p95} />
       <Row label="zoom" spanRef={zoom} />
+
+      <div className="stats-section">scene</div>
       <Row label="drawn/total" spanRef={drawn} />
+      <Row label="tested" spanRef={tested} />
       <Row label="cache hit" spanRef={cache} />
       <Row label="grid lines" spanRef={grid} />
       <Row label="idle frames" spanRef={idle} />
+
+      {/* Grouped under a header carrying the unit, so the four numbers line up
+          and the labels stay distinct from the counters above — `draw` the
+          stage is not `drawn/total` the ratio, and confusing them is how you
+          end up optimising the wrong half of the frame. */}
+      <div className="stats-section">stages · ms</div>
+      {STAGE_NAMES.map((stage) => (
+        <div className="stats-row" key={stage}>
+          <span className="stats-label">{stage}</span>
+          <span
+            className="stats-value"
+            ref={(el) => {
+              stageRefs.current[stage] = el;
+            }}
+          >
+            –
+          </span>
+        </div>
+      ))}
     </div>
   );
 }

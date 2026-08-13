@@ -803,6 +803,44 @@ count, visible count, dirty rect count, dirty area %, full-repaint count, cache 
 "full repaint: 41 ms @ 10k elements → dirty rects: 3.2 ms, 12.8× faster" is worth ten repos
 that say "uses dirty rectangle rendering for performance."
 
+### 10.1 How this project measures — and why a clock is the wrong instrument for CI
+
+Built in Phase 3. Four decisions, each avoiding a specific failure.
+
+**Split the frame before timing it.** `StageTimer` accumulates `cull`, `grid`, `draw` and
+`interactive` separately. One number tells you a frame was slow; it cannot tell you which of four
+things did it — and the two that matter scale differently on purpose:
+
+```
+cull  is O(total)    grows with everything that exists
+draw  is O(visible)  grows with what fits on the screen
+```
+
+Zoom into a corner of a large drawing and `draw` collapses while `cull` does not move at all. That
+divergence *is* the argument for §5's quadtree, and it is invisible in an aggregate. Reported as a
+single figure, you could halve the cull, watch the total barely move, and have no idea why.
+
+**Count work; don't time it, when the claim is about complexity.** `Scene.queryStats.tested` is the
+number of elements the cull examined. A timing assertion is flaky on a shared CI runner, and it
+cannot distinguish a constant-factor win from an algorithmic one — both move a stopwatch, only one
+still works at 500,000 elements. A count is exactly reproducible, identical on every machine, and
+measures the complexity class directly. So CI asserts the count; the stopwatch lives in
+`npm run bench`, where a human reads it and knows what machine produced it.
+
+**Generate the load deterministically, and be precise about how far that goes.** The scene
+generator seeds position, size, type, rotation, style, z-order and the Rough.js `seed` — every
+input that changes what a frame costs. It does *not* seed element `id`, which is pure identity and
+changes nothing measurable. The rule: make it deterministic exactly where non-determinism would
+move the measurement, and no further. A benchmark you cannot reproduce is an anecdote.
+
+**Instrument the instrument.** The stats overlay writes `textContent` through refs rather than
+re-rendering React, and User Timing marks are opt-in — `performance.mark` allocates an entry per
+call and retains it until cleared. A profiler that allocates every frame manufactures the GC pause
+it is trying to detect. Phase 1 produced the cheaper version of this lesson: the overlay read
+`grid lines: 0` forever, because stats were emitted on idle frames and idle frames vastly outnumber
+rendered ones. **A broken instrument is more dangerous than a broken feature** — it sends you to
+debug the wrong thing.
+
 ---
 
 ## 11. End-to-end trace: what happens when you drag a rectangle

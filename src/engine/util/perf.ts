@@ -153,3 +153,98 @@ export const now: () => number =
   typeof performance !== 'undefined' && typeof performance.now === 'function'
     ? () => performance.now()
     : () => Date.now();
+
+/* ── Stage timing ─────────────────────────────────────────────────────────── */
+
+/**
+ * The regions of a frame worth measuring separately.
+ *
+ * "The frame takes 40 ms" is not actionable. "The cull takes 38 ms of the 40"
+ * points at exactly one function. Splitting the frame is the difference between
+ * knowing you have a problem and knowing where it is.
+ */
+export type StageName = 'cull' | 'grid' | 'draw' | 'interactive';
+
+export const STAGE_NAMES: readonly StageName[] = ['cull', 'grid', 'draw', 'interactive'];
+
+export type StageTimings = Readonly<Record<StageName, number>>;
+
+export const ZERO_STAGES: StageTimings = { cull: 0, grid: 0, draw: 0, interactive: 0 };
+
+/**
+ * Per-stage frame timing, with optional User Timing marks.
+ *
+ * ── Why begin/end rather than `time(stage, fn)` ─────────────────────────────
+ *
+ * The closure form reads better:
+ *
+ *     timer.time('cull', () => scene.visible(view))
+ *
+ * …but it allocates a closure per stage per frame — four allocations every
+ * 16 ms, forever. Small, and also exactly the kind of steady garbage that turns
+ * into a GC pause landing *inside* the measurement. An instrument should not
+ * manufacture the thing it is measuring.
+ *
+ * ── Why User Timing marks are opt-in ────────────────────────────────────────
+ *
+ * `performance.mark`/`measure` put named regions in the Chrome DevTools
+ * performance flamegraph, which is the fastest way to see where a frame went.
+ * They also allocate a `PerformanceEntry` per call and are retained until
+ * cleared, so leaving them on permanently costs more than the stages do. Off by
+ * default; the dev panel turns them on for the length of a trace.
+ */
+export class StageTimer {
+  private readonly accum: Record<StageName, number> = { ...ZERO_STAGES };
+  private readonly startedAt: Record<StageName, number> = { ...ZERO_STAGES };
+  private marksEnabled = false;
+
+  /** Enable `performance.mark`/`measure`. Only while actively recording a trace. */
+  setMarksEnabled(enabled: boolean): void {
+    this.marksEnabled = enabled;
+    if (!enabled && supportsUserTiming()) {
+      // Entries accumulate in the performance buffer until cleared, and a long
+      // session with marks left on eventually evicts its own earlier entries —
+      // silently, so the part of the trace you wanted is the part that is gone.
+      performance.clearMarks();
+      performance.clearMeasures();
+    }
+  }
+
+  get isMarking(): boolean {
+    return this.marksEnabled;
+  }
+
+  /** Zero the accumulators. Called at the top of each frame. */
+  reset(): void {
+    for (const stage of STAGE_NAMES) this.accum[stage] = 0;
+  }
+
+  begin(stage: StageName): void {
+    this.startedAt[stage] = now();
+    if (this.marksEnabled && supportsUserTiming()) performance.mark(`${stage}:start`);
+  }
+
+  end(stage: StageName): void {
+    // `+=` rather than `=`: a stage can legitimately run more than once in a
+    // frame, and the total is what matters, not the last occurrence.
+    this.accum[stage] += now() - this.startedAt[stage];
+
+    if (this.marksEnabled && supportsUserTiming()) {
+      performance.mark(`${stage}:end`);
+      try {
+        performance.measure(stage, `${stage}:start`, `${stage}:end`);
+      } catch {
+        // A missing start mark throws. Not worth failing a frame over — the
+        // measurement is diagnostic; the rendering is not.
+      }
+    }
+  }
+
+  read(): StageTimings {
+    return { ...this.accum };
+  }
+}
+
+function supportsUserTiming(): boolean {
+  return typeof performance !== 'undefined' && typeof performance.mark === 'function';
+}

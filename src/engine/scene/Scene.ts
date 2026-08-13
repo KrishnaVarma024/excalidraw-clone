@@ -55,6 +55,14 @@ export type SceneListener = (change: SceneChange) => void;
  */
 export type ElementPatch = Partial<Omit<Element, 'id' | 'seed' | 'version' | 'type'>>;
 
+/** Work performed by a spatial query. See `Scene.queryStats`. */
+export interface QueryStats {
+  /** Elements examined. Under a linear scan this equals the live element count. */
+  readonly tested: number;
+  /** Elements returned. `returned / tested` is the selectivity of the query. */
+  readonly returned: number;
+}
+
 export class Scene {
   private readonly elements = new Map<ElementId, Element>();
   private readonly listeners = new Set<SceneListener>();
@@ -62,6 +70,8 @@ export class Scene {
   /** Lazily rebuilt z-sorted view of non-deleted elements. */
   private sortedCache: Element[] | null = null;
   private maxZ = 0;
+
+  private lastQuery: QueryStats = { tested: 0, returned: 0 };
 
   /* ── reading ────────────────────────────────────────────────────────────── */
 
@@ -101,11 +111,35 @@ export class Scene {
    * it.
    */
   visible(view: Bounds): readonly Element[] {
+    const all = this.sorted();
     const out: Element[] = [];
-    for (const el of this.sorted()) {
+    for (const el of all) {
       if (boundsIntersect(getRenderBounds(el), view)) out.push(el);
     }
+
+    this.lastQuery = { tested: all.length, returned: out.length };
     return out;
+  }
+
+  /**
+   * Work done by the last `visible()` call.
+   *
+   * `tested` is the number of elements examined, and counting it rather than
+   * timing it is the point.
+   *
+   * A test that asserts "the cull got faster" by measuring wall-clock time is
+   * flaky in CI and says nothing about complexity — a loaded machine can make
+   * O(log n) look worse than O(n). A test that asserts *how many elements were
+   * examined* proves the complexity class directly and gives the same answer on
+   * every machine.
+   *
+   * Right now `tested` equals the live element count on every frame, which is
+   * the definition of a linear scan. Phase 4's quadtree makes it grow
+   * logarithmically, and the very same assertion goes from documenting the
+   * problem to proving the fix.
+   */
+  get queryStats(): Readonly<QueryStats> {
+    return this.lastQuery;
   }
 
   /* ── writing ────────────────────────────────────────────────────────────── */
