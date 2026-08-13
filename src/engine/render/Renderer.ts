@@ -1,37 +1,43 @@
 /**
- * The renderer.
+ * The static renderer — everything that has been committed to the scene.
  *
- * Phase 1 does the simplest correct thing: clear everything, draw everything.
- * There are no elements yet, so "everything" is the grid — which genuinely does
- * have to be fully redrawn on every viewport change, because panning moves
- * every single line.
+ * Still a full repaint per frame, and that is still the right answer for what
+ * it currently does: any viewport change moves every element and every grid
+ * line, so there is nothing worth preserving.
  *
- * That is worth saying out loud, because Phase 5 replaces this with
- * dirty-rectangle rendering and it would be easy to read the change as
- * "full repaint was wrong, partial repaint is right". It is not that simple:
+ * What Phase 2 adds is **viewport culling**. The renderer asks the scene for
+ * elements whose bounds intersect the visible rectangle and draws only those.
+ * That is the difference between frame cost tracking *what exists* and tracking
+ * *what you can see*.
  *
- *   - full repaint is CORRECT and optimal when most of the screen changed
- *     (panning, zooming, resizing, theme switches)
- *   - partial repaint wins when a small region changed (dragging one shape,
- *     editing text, a blinking caret)
+ * The cull is O(n): a bounds test per element, every frame. Fine at a few
+ * thousand, and exactly the cost Phase 4's quadtree replaces with an O(log n)
+ * range query. Phase 3 measures where the crossover actually is rather than
+ * guessing.
  *
- * Phase 5 does not delete this path. It adds the other one and a heuristic for
- * choosing between them — and this code stays as the escape hatch.
+ * ── The structural rule, unchanged ──────────────────────────────────────────
  *
- * ── The one structural rule ─────────────────────────────────────────────────
- *
- * The renderer reads state and writes pixels. It never mutates the viewport,
- * the scene, or anything else. That purity is what will let Phase 9 reuse this
- * exact code path to render an export at a different scale, with a different
- * transform, to an offscreen canvas — with no changes.
+ * The renderer reads state and writes pixels. It mutates nothing. That purity
+ * is what lets Phase 9 point this same code at an offscreen canvas with a
+ * different transform and get an export, with no changes to this file.
  */
 
 import type { Viewport } from '../viewport/Viewport';
+import type { Scene } from '../scene/Scene';
 import { type GridStyle, drawGrid } from './grid';
+import { createRoughCanvas, drawElement } from './drawElement';
+import { RoughCache } from './roughCache';
+import type { RoughCanvas } from 'roughjs/bin/canvas';
 
 export interface RenderStats {
-  /** Grid lines stroked this frame. Sanity check that LOD is working. */
+  /** Grid lines stroked this frame. A cheap check that LOD is working. */
   gridLines: number;
+  /** Elements drawn this frame — those that survived culling. */
+  drawn: number;
+  /** Live elements in the scene. `drawn / total` is the culling ratio. */
+  total: number;
+  /** Rough.js drawable cache hit rate, 0…1. Sits at ~1 once warm. */
+  cacheHitRate: number;
 }
 
 export interface Theme {
@@ -59,8 +65,16 @@ export const DARK_THEME: Theme = {
 
 export class Renderer {
   private theme: Theme = LIGHT_THEME;
+  private readonly rough: RoughCanvas;
+  readonly cache = new RoughCache();
 
-  constructor(private readonly ctx: CanvasRenderingContext2D) {}
+  constructor(
+    private readonly ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    private readonly scene: Scene,
+  ) {
+    this.rough = createRoughCanvas(canvas);
+  }
 
   setTheme(theme: Theme): void {
     this.theme = theme;
@@ -72,33 +86,42 @@ export class Renderer {
     const cssW = vp.width;
     const cssH = vp.height;
 
+    this.cache.resetStats();
+
     /* ── 1. Clear, in DEVICE space ─────────────────────────────────────────
-       The identity transform here is not laziness — it means the clear covers
-       the entire backing store regardless of what the scene transform is doing.
-       Clearing under a scene transform while scrolled far from the origin is a
-       classic way to miss part of the canvas and leave stale pixels behind. */
+       Identity transform, so the clear covers the whole backing store whatever
+       the scene transform is doing. Clearing under a scene transform while
+       scrolled far from the origin is a reliable way to miss part of the canvas
+       and leave stale pixels behind. */
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = this.theme.background;
     ctx.fillRect(0, 0, Math.ceil(cssW * dpr), Math.ceil(cssH * dpr));
 
     /* ── 2. Chrome, in SCREEN space ────────────────────────────────────────
-       Scale by DPR only. The grid positions itself using the viewport
-       transform internally but strokes 1-CSS-pixel lines, so it stays crisp at
-       every zoom. See the note in grid.ts about chrome vs content. */
+       DPR only. The grid positions itself using the viewport transform but
+       strokes 1-CSS-pixel lines, so it stays crisp at every zoom. */
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const gridLines = drawGrid(ctx, vp.get(), cssW, cssH, this.theme.grid);
 
     /* ── 3. Content, in SCENE space ────────────────────────────────────────
-       From here on, draw code uses raw scene coordinates and never thinks
-       about zoom, scroll, or devicePixelRatio again — that is the entire
-       purpose of folding all three into one matrix.
-
-       Phase 2 fills this in with elements. */
+       From here on every draw call is in raw scene coordinates. Nothing below
+       this line knows about zoom, scroll or devicePixelRatio. */
     const m = vp.deviceMatrix();
     ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
 
-    // (nothing to draw yet)
+    const visible = this.scene.visible(vp.visibleSceneBounds());
+    for (const el of visible) {
+      drawElement(ctx, this.rough, this.cache, el);
+    }
 
-    return { gridLines };
+    const { hits, misses } = this.cache.stats();
+    const lookups = hits + misses;
+
+    return {
+      gridLines,
+      drawn: visible.length,
+      total: this.scene.visibleCount,
+      cacheHitRate: lookups === 0 ? 1 : hits / lookups,
+    };
   }
 }

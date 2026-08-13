@@ -6,70 +6,70 @@ interface Props {
 }
 
 /**
- * Mounts the drawing surface and hands it to the engine.
+ * Mounts the two drawing surfaces and hands them to the engine.
  *
- * This component renders once per mount and then only when the pan cursor
- * changes. Add a `console.log` to its body and pan around for thirty seconds:
- * it must print nothing. That property is the whole architecture in one
- * observable fact — see ARCHITECTURE §1.
+ * This component renders once per mount and then only when the cursor changes.
+ * Add a `console.log` to its body, draw and pan for thirty seconds: it must
+ * print nothing. That property is the architecture in one observable fact.
  *
  * Its real responsibilities are the three things only the DOM can tell us: how
- * big the canvas should be, what the device pixel ratio is, and whether the
+ * big the canvases should be, what the device pixel ratio is, and whether the
  * user prefers a dark theme.
  *
- * ── Why the canvas is wrapped in a div ──────────────────────────────────────
+ * ── Why two stacked canvases ────────────────────────────────────────────────
  *
- * This looks like a redundant element. It is load-bearing, and leaving it out
- * produces a genuinely nasty bug.
+ * The static canvas holds committed elements and is repainted only when the
+ * scene or viewport changes. The interactive canvas holds the shape currently
+ * being drawn and is cleared and redrawn every frame during a gesture. Because
+ * it holds at most a couple of things, that costs a fraction of a millisecond
+ * regardless of how many thousand elements exist below it.
  *
- * `<canvas>` is a *replaced element*, like `<img>`. Its intrinsic size comes
- * from the `width`/`height` **attributes**, and `width: auto` resolves to that
- * intrinsic size rather than stretching — so `position: absolute; inset: 0`
- * does *not* make a canvas fill its parent the way it would a div.
+ * The interactive canvas is on top and owns all pointer events — it is what the
+ * user is actually pointing at. The static canvas gets `pointer-events: none`
+ * so it never intercepts anything.
  *
- * Which sets up a feedback loop:
+ * ── Why the wrapper div ─────────────────────────────────────────────────────
  *
- *     ResizeObserver fires → we measure the canvas → we set canvas.width =
- *     measured × dpr → the attribute change grows the element's CSS size →
- *     ResizeObserver fires again → …
- *
- * At dpr 2 the canvas doubles every cycle. A 1200px canvas reached 38,400px in
- * under a second, memory ballooned, and the grid silently stopped drawing
- * because its own line-count guard tripped.
- *
- * The fix is to break the loop: measure a plain `<div>` (which stretches
- * normally and is unaffected by anything we do to the canvas), and set the
- * canvas's CSS size *explicitly* so it never derives from its attributes.
+ * `<canvas>` is a *replaced element*, like `<img>`: `width: auto` resolves to
+ * its intrinsic size from the width/height attributes rather than stretching, so
+ * `inset: 0` does not fill the parent. A ResizeObserver watching a canvas whose
+ * `width` attribute you set from the callback is a feedback loop — in Phase 1 it
+ * doubled the canvas every cycle until it reached 38,400 pixels. Measuring a
+ * plain div breaks the loop.
  */
 export function CanvasHost({ onEngineReady }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const staticRef = useRef<HTMLCanvasElement>(null);
+  const interactiveRef = useRef<HTMLCanvasElement>(null);
   const [panAffordance, setPanAffordance] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
-    const canvas = canvasRef.current;
-    if (container === null || canvas === null) return;
+    const staticCanvas = staticRef.current;
+    const interactiveCanvas = interactiveRef.current;
+    if (container === null || staticCanvas === null || interactiveCanvas === null) return;
 
     const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
-    const engine = new Engine(canvas, prefersDark.matches ? DARK_THEME : LIGHT_THEME);
+    const engine = new Engine(
+      staticCanvas,
+      interactiveCanvas,
+      prefersDark.matches ? DARK_THEME : LIGHT_THEME,
+    );
 
     /* ── size ──────────────────────────────────────────────────────────────
-       ResizeObserver rather than window.onresize: `resize` fires only for the
-       *window*, so it misses a collapsing sidebar, a split-pane drag, a CSS
-       change, or the element moving into a differently-sized container — all of
-       which change our canvas and none of which resize the window. */
+       ResizeObserver, not window.onresize: `resize` fires only for the window,
+       so it misses a collapsing sidebar, a split-pane drag, a CSS change, or the
+       element moving into a differently-sized container. */
     const measure = () => {
       const rect = container.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
 
-      // CSS size: what the page lays out. Set explicitly — see the note above.
-      canvas.style.width = `${rect.width}px`;
-      canvas.style.height = `${rect.height}px`;
+      // CSS size set explicitly, so it never derives from the width attribute.
+      for (const canvas of [staticCanvas, interactiveCanvas]) {
+        canvas.style.width = `${rect.width}px`;
+        canvas.style.height = `${rect.height}px`;
+      }
 
-      // Backing store: physical pixels. Assigned inside Engine.resize, which
-      // guards against redundant writes because assigning canvas.width clears
-      // the surface even when the value is unchanged.
       engine.resize(rect.width, rect.height, dpr);
     };
 
@@ -79,13 +79,13 @@ export function CanvasHost({ onEngineReady }: Props) {
 
     /* ── device pixel ratio ────────────────────────────────────────────────
        DPR is not constant. Drag the window from a Retina display to an external
-       1080p monitor and it changes mid-session, with nothing to announce it —
-       the CSS size is identical, so ResizeObserver stays quiet and the canvas
+       1080p monitor and it changes mid-session with nothing to announce it — the
+       CSS size is identical, so ResizeObserver stays quiet and the canvas
        silently renders at half resolution.
 
-       The idiom is a media query matching the *current* ratio: it stops
-       matching the moment the ratio changes, which fires `change`. Each new
-       ratio needs a new query, hence the re-arm. */
+       The idiom is a media query matching the *current* ratio: it stops matching
+       the moment the ratio changes, which fires `change`. Each new ratio needs a
+       new query, hence the re-arm. */
     let dprQuery: MediaQueryList | null = null;
     const onDprChange = () => {
       measure();
@@ -107,8 +107,8 @@ export function CanvasHost({ onEngineReady }: Props) {
     prefersDark.addEventListener('change', onThemeChange);
 
     /* ── cursor ────────────────────────────────────────────────────────────
-       The one piece of engine state this component does re-render for, and it
-       is genuinely discrete: it flips when space goes down or up, not per frame. */
+       The one piece of engine state this component re-renders for, and it is
+       genuinely discrete: it flips when space goes down or up, not per frame. */
     const unsubscribe = engine.subscribe(() => {
       setPanAffordance(engine.getSnapshot().panAffordance);
     });
@@ -130,10 +130,12 @@ export function CanvasHost({ onEngineReady }: Props) {
 
   return (
     <div ref={containerRef} className="canvas-host">
+      <canvas ref={staticRef} className="layer layer-static" aria-hidden="true" />
       <canvas
-        ref={canvasRef}
-        style={{ cursor: panAffordance ? 'grabbing' : 'default' }}
-        aria-label="Infinite drawing canvas. Use the zoom controls to navigate."
+        ref={interactiveRef}
+        className="layer layer-interactive"
+        style={{ cursor: panAffordance ? 'grabbing' : 'crosshair' }}
+        aria-label="Drawing canvas. Pick a tool from the toolbar, then drag to draw."
         role="img"
       />
     </div>
