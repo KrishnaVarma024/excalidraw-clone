@@ -1,56 +1,64 @@
 /**
  * The engine. Owns the render loop and everything below it.
  *
- * This is the seam. React constructs one of these, hands it a canvas, and from
- * that point talks to it only through:
+ * React constructs one of these, hands it two canvases, and from that point
+ * talks to it only through:
  *
  *   subscribe(fn) / getSnapshot()   ← discrete state, via useSyncExternalStore
  *   addFrameListener(fn)            ← per-frame numbers, written straight to DOM
- *   dispatch-style methods          ← zoomIn(), resetZoom(), …
+ *   command methods                 ← setTool(), setStyle(), zoomIn(), …
  *
  * ── Why two notification channels ───────────────────────────────────────────
  *
- * This is the design decision in this file, and it is not obvious.
- *
  * `useSyncExternalStore` is React's correct answer for external state, and we
  * use it — but it re-renders on every notification. That is right for state
- * that changes *discretely*: the active tool, the stroke colour, whether undo
- * is available. A few dozen renders a minute.
+ * that changes *discretely*: the active tool, the stroke colour, the element
+ * count. A few dozen renders a minute.
  *
- * It is wrong for state that changes *continuously*: fps, frame time, and the
- * zoom percentage during a pinch gesture. Those change every frame. Routing
- * them through the store means 60 React renders per second — precisely the cost
- * this entire architecture exists to avoid.
+ * It is wrong for state that changes *continuously*: frame time, the raw zoom
+ * float during a pinch. Routing those through the store means 60 React renders
+ * a second — precisely the cost this architecture exists to avoid.
  *
- * So there are two channels, chosen by how the value behaves rather than by
- * what it is:
+ * So the channel is chosen by how a value *behaves*, not by what it is:
  *
- *   discrete  → subscribe/getSnapshot → React re-renders → JSX
- *   continuous → addFrameListener     → component writes textContent via a ref
+ *   discrete   → subscribe/getSnapshot → React re-renders → JSX
+ *   continuous → addFrameListener      → component writes textContent via a ref
  *
- * The second one looks like cheating. It is not: it is the same technique
- * React's own docs describe for "values that change too fast to render", and it
- * is why the stats overlay can update 4× a second and the zoom readout can
- * track a pinch smoothly while React's profiler shows a flat zero.
+ * The rule of thumb: **if a human cannot read it at the rate it changes, it does
+ * not belong in the render tree.**
  *
- * Zoom appears in *both*, deliberately. The snapshot carries the rounded
- * integer percentage and only notifies when that integer changes, so a smooth
- * pinch from 100% to 103% produces three renders rather than ninety.
+ * ── Why two dirty flags ─────────────────────────────────────────────────────
+ *
+ * New in Phase 2, and the reason the two-canvas split pays off. Drawing a shape
+ * dirties the *interactive* layer 60 times a second while the *static* layer
+ * stays untouched — so the cost of dragging out a rectangle is independent of
+ * how many thousand shapes are already on the canvas.
+ *
+ * Both start true so the first frame paints. When neither is set the loop does
+ * nothing at all: no clear, no draw, no allocation.
  */
 
-import { Renderer, type RenderStats, type Theme, DARK_THEME, LIGHT_THEME } from './render/Renderer';
-import { ViewportInput } from './input/ViewportInput';
+import { DARK_THEME, LIGHT_THEME, Renderer, type RenderStats, type Theme } from './render/Renderer';
+import { InteractiveRenderer } from './render/InteractiveRenderer';
+import { InputRouter, type InputDelegate, type PointerInfo } from './input/InputRouter';
 import { Viewport } from './viewport/Viewport';
+import { Scene } from './scene/Scene';
+import { getSceneBounds } from './scene/bounds';
+import { DEFAULT_STYLE, type Element, type ElementStyle } from './scene/element.types';
+import { TOOL_SHORTCUTS, ToolManager, type ToolType } from './tools/ToolManager';
 import { FrameTimer, type FrameStats, now } from './util/perf';
 import type { Bounds } from './util/geometry';
 
 /** Discrete state React renders from. Changes rarely. */
 export interface EngineSnapshot {
+  readonly activeTool: ToolType;
+  readonly style: Readonly<ElementStyle>;
+  readonly elementCount: number;
   /** Zoom as a whole-number percentage. 1.0 → 100. */
   readonly zoomPercent: number;
   readonly canZoomIn: boolean;
   readonly canZoomOut: boolean;
-  /** True while space is held or a pan drag is in progress — drives the cursor. */
+  /** Space held or a pan drag in progress — drives the cursor. */
   readonly panAffordance: boolean;
 }
 
@@ -60,58 +68,62 @@ export interface FrameInfo {
   readonly zoom: number;
   readonly scrollX: number;
   readonly scrollY: number;
-  readonly gridLines: number;
+  readonly render: RenderStats;
   /** Frames skipped because nothing changed. High is good. */
   readonly idleFrames: number;
 }
 
 export class Engine {
   readonly viewport = new Viewport();
+  readonly scene = new Scene();
 
   private readonly renderer: Renderer;
-  private readonly input: ViewportInput;
+  private readonly interactive: InteractiveRenderer;
+  private readonly tools: ToolManager;
+  private readonly input: InputRouter;
   private readonly timer = new FrameTimer();
 
   private rafId: number | null = null;
   private running = false;
 
-  /**
-   * Set when something has changed that requires a repaint.
-   *
-   * Starts true so the first frame draws. An idle canvas sets this false and
-   * the loop then does nothing per frame but re-schedule itself — no clear, no
-   * draw, no allocation. On a laptop that is the difference between an idle tab
-   * costing ~0% CPU and ~8%, which is the difference between a tool people
-   * leave open and one they close.
-   */
-  private needsRender = true;
+  private needsStaticRender = true;
+  private needsInteractiveRender = true;
   private idleFrames = 0;
 
   /**
    * Stats from the most recent frame that actually drew.
    *
-   * Held rather than recomputed because `emitFrameInfo` runs on idle frames
-   * too — and reporting zero on those made the overlay read "grid lines: 0"
-   * permanently, since idle frames vastly outnumber rendered ones. The first
-   * version of this file had exactly that bug, and it looked like a rendering
-   * failure rather than a reporting one.
+   * Held rather than recomputed, because `emitFrameInfo` also runs on idle
+   * frames — and reporting zeroes on those made the overlay read "grid lines: 0"
+   * permanently in Phase 1, since idle frames vastly outnumber rendered ones.
+   * A broken instrument is more dangerous than a broken feature: it sends you
+   * debugging the wrong thing.
    */
-  private lastRenderStats: RenderStats = { gridLines: 0 };
+  private lastRenderStats: RenderStats = {
+    gridLines: 0,
+    drawn: 0,
+    total: 0,
+    cacheHitRate: 1,
+  };
 
   private readonly listeners = new Set<() => void>();
   private readonly frameListeners = new Set<(info: FrameInfo) => void>();
 
   /**
-   * The snapshot object handed to React.
+   * The snapshot handed to React.
    *
    * MUST be referentially stable between notifications. `useSyncExternalStore`
-   * compares successive `getSnapshot()` results with `Object.is`; returning a
-   * fresh object literal each call means "changed" is always true, React
-   * re-renders, calls getSnapshot again, sees another new object, and the app
-   * locks up in an infinite render loop. This field is the cached result and it
-   * is replaced only inside `refreshSnapshot()`.
+   * compares consecutive `getSnapshot()` results with `Object.is`; returning a
+   * fresh object literal each call means "changed" is always true, so React
+   * re-renders, calls getSnapshot again, gets another new object, and does not
+   * terminate. React's own docs name the error: *"The result of getSnapshot
+   * should be cached."* This field is the cache, replaced only in
+   * `refreshSnapshot()`.
    */
   private snapshot: EngineSnapshot = {
+    activeTool: 'selection',
+    style: DEFAULT_STYLE,
+    elementCount: 0,
     zoomPercent: 100,
     canZoomIn: true,
     canZoomOut: true,
@@ -122,28 +134,51 @@ export class Engine {
   private lastFrameEmit = 0;
 
   constructor(
-    private readonly canvas: HTMLCanvasElement,
+    private readonly staticCanvas: HTMLCanvasElement,
+    private readonly interactiveCanvas: HTMLCanvasElement,
     theme: Theme = LIGHT_THEME,
   ) {
-    const ctx = canvas.getContext('2d', {
-      // We paint an opaque background every frame, so tell the compositor it
-      // never has to blend this canvas with what is behind it. Measurably
-      // cheaper on large surfaces, and it also disables subpixel-antialiasing
-      // surprises on text later.
-      alpha: false,
-    });
-    if (ctx === null) {
-      throw new Error(
-        'Could not acquire a 2D canvas context. This can happen in hardened ' +
-          'browser configurations or headless environments without a GPU.',
-      );
-    }
+    // The static canvas paints an opaque background every frame, so tell the
+    // compositor it never has to blend — measurably cheaper on large surfaces.
+    // The interactive canvas MUST be transparent or it would hide everything
+    // underneath it.
+    const staticCtx = get2d(staticCanvas, { alpha: false });
+    const interactiveCtx = get2d(interactiveCanvas, { alpha: true });
 
-    this.renderer = new Renderer(ctx);
+    this.renderer = new Renderer(staticCtx, staticCanvas, this.scene);
     this.renderer.setTheme(theme);
+    this.interactive = new InteractiveRenderer(interactiveCtx, interactiveCanvas);
 
-    this.input = new ViewportInput(canvas, this.viewport, {
-      onChange: () => this.markDirty(),
+    this.tools = new ToolManager(this.scene, DEFAULT_STYLE, {
+      onDraftChange: () => {
+        this.needsInteractiveRender = true;
+      },
+      onCommit: () => {
+        this.needsStaticRender = true;
+        this.refreshSnapshot();
+      },
+      onToolChange: () => this.refreshSnapshot(),
+    });
+
+    // Any scene change dirties the static layer. In Phase 5 this callback grows
+    // teeth: `change.before` and `change.after` become the dirty rectangles, and
+    // a moved element contributes both — where it was and where it is.
+    this.scene.subscribe(() => {
+      this.needsStaticRender = true;
+    });
+
+    // Pointer events go on the *interactive* canvas: it is on top, so it is what
+    // the user is actually pointing at. The static canvas below it has
+    // `pointer-events: none`.
+    this.input = new InputRouter(interactiveCanvas, this.viewport, this.delegate(), {
+      onViewportChange: () => {
+        // A viewport change moves every element and every grid line, so both
+        // layers are invalid. This is the case where full repaint is not just
+        // acceptable but optimal.
+        this.needsStaticRender = true;
+        this.needsInteractiveRender = true;
+        this.refreshSnapshot();
+      },
       onPanStateChange: ({ spaceHeld, panning }) => {
         const next = spaceHeld || panning;
         if (next === this.panAffordance) return;
@@ -151,6 +186,24 @@ export class Engine {
         this.refreshSnapshot();
       },
     });
+  }
+
+  /** Bridge between the input router's protocol and the tool manager's. */
+  private delegate(): InputDelegate {
+    return {
+      onPointerDown: (info: PointerInfo) => this.tools.onPointerDown(info.scene, info),
+      onPointerMove: (info: PointerInfo) => this.tools.onPointerMove(info.scene, info),
+      onPointerUp: () => {
+        this.tools.onPointerUp();
+      },
+      onCancel: () => this.tools.cancel(),
+      onKeyDown: (e: KeyboardEvent) => {
+        const tool = TOOL_SHORTCUTS[e.key.toLowerCase()];
+        if (tool === undefined) return false;
+        this.setTool(tool);
+        return true;
+      },
+    };
   }
 
   /* ── lifecycle ──────────────────────────────────────────────────────────── */
@@ -181,92 +234,118 @@ export class Engine {
     if (!this.running) return;
     this.rafId = requestAnimationFrame(this.loop);
 
-    if (!this.needsRender) {
+    if (!this.needsStaticRender && !this.needsInteractiveRender) {
       this.idleFrames++;
-      // Still emit occasionally so the overlay does not look frozen — but do no
-      // drawing work at all, and report the *last* render's stats rather than
-      // zeroes, which would otherwise be all anyone ever saw.
       this.emitFrameInfo(frameStart);
       return;
     }
 
-    this.needsRender = false;
-    this.lastRenderStats = this.renderer.render(this.viewport);
-    const frameEnd = now();
-    this.timer.record(frameStart, frameEnd);
+    if (this.needsStaticRender) {
+      this.needsStaticRender = false;
+      this.lastRenderStats = this.renderer.render(this.viewport);
+    }
+
+    if (this.needsInteractiveRender) {
+      this.needsInteractiveRender = false;
+      this.interactive.render(this.viewport, this.tools.draftElement);
+    }
+
+    this.timer.record(frameStart, now());
     this.emitFrameInfo(frameStart);
   };
 
   /**
-   * Request a repaint on the next frame.
+   * Request a repaint of both layers on the next frame.
    *
-   * Note what this does *not* do: draw. A pan gesture emitting 200
-   * `pointermove` events between two frames calls this 200 times; the canvas is
-   * painted once. Coalescing input into frames is what rAF is for, and doing
-   * the work inside the event handler instead is the single most common reason
-   * canvas apps feel worse than they should.
+   * Note what this does *not* do: draw. A gesture emitting 200 `pointermove`
+   * events between two frames marks dirty 200 times and paints once. Coalescing
+   * input into frames is what rAF is for, and doing the work inside the event
+   * handler instead is the single most common reason canvas apps feel worse
+   * than they should.
    */
   markDirty(): void {
-    this.needsRender = true;
-    this.refreshSnapshot();
+    this.needsStaticRender = true;
+    this.needsInteractiveRender = true;
   }
 
   /* ── sizing ─────────────────────────────────────────────────────────────── */
 
   /**
-   * Resize the backing store. Called by the ResizeObserver in CanvasHost.
+   * Resize both backing stores. Called by the ResizeObserver in CanvasHost.
    *
-   * Two sizes, and conflating them is *the* reason canvas apps look blurry on
-   * a Retina display:
+   * Two sizes, and conflating them is *the* reason canvas apps look blurry on a
+   * HiDPI display: `canvas.width/height` is the backing store in PHYSICAL
+   * pixels, `canvas.style.*` is the layout box in CSS pixels. At dpr 2 a canvas
+   * laid out at 800 CSS px needs a 1600 px backing store.
    *
-   *   canvas.width/height  — the backing store, in PHYSICAL pixels
-   *   canvas.style.*       — the layout box, in CSS pixels
-   *
-   * With `dpr = 2`, a canvas laid out at 800 CSS px needs a 1600 px backing
-   * store. Set only the CSS size and the browser stretches an 800 px bitmap
-   * across 1600 physical pixels — every edge softened by interpolation.
-   *
-   * Assigning to `canvas.width` also **clears the canvas and resets the
-   * transform**, even when assigning the same value. Hence the guard, and
-   * hence a resize always forcing a full repaint — a constraint that shapes
-   * the dirty-rectangle design in Phase 5.
+   * Assigning `canvas.width` also **clears the canvas and resets the transform**,
+   * even when assigning the same value — hence the guard, and hence a resize
+   * always forcing a full repaint. That constraint shapes the whole
+   * dirty-rectangle design in Phase 5.
    */
   resize(cssWidth: number, cssHeight: number, dpr: number): void {
     const w = Math.max(1, Math.round(cssWidth * dpr));
     const h = Math.max(1, Math.round(cssHeight * dpr));
 
-    if (this.canvas.width !== w) this.canvas.width = w;
-    if (this.canvas.height !== h) this.canvas.height = h;
+    for (const canvas of [this.staticCanvas, this.interactiveCanvas]) {
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+    }
 
     this.viewport.setSize(cssWidth, cssHeight, dpr);
+    this.input.invalidateRect();
     this.markDirty();
   }
 
   setTheme(theme: Theme): void {
     this.renderer.setTheme(theme);
-    this.markDirty();
+    this.needsStaticRender = true;
   }
 
   /* ── commands (called from React) ───────────────────────────────────────── */
 
+  setTool(tool: ToolType): void {
+    this.tools.setTool(tool);
+  }
+
+  setStyle(patch: Partial<ElementStyle>): void {
+    this.tools.setStyle(patch);
+    this.refreshSnapshot();
+  }
+
+  clearScene(): void {
+    if (this.scene.visibleCount === 0) return;
+    this.scene.clear();
+    this.renderer.cache.clear();
+    this.refreshSnapshot();
+  }
+
   zoomIn(): void {
-    if (this.viewport.zoomByFactor(1.1)) this.markDirty();
+    if (this.viewport.zoomByFactor(1.1)) this.onViewportCommand();
   }
 
   zoomOut(): void {
-    if (this.viewport.zoomByFactor(1 / 1.1)) this.markDirty();
+    if (this.viewport.zoomByFactor(1 / 1.1)) this.onViewportCommand();
   }
 
   resetZoom(): void {
-    if (this.viewport.resetZoom()) this.markDirty();
+    if (this.viewport.resetZoom()) this.onViewportCommand();
   }
 
-  resetView(): void {
-    if (this.viewport.reset()) this.markDirty();
+  /** Frame the whole drawing. No-op on an empty scene rather than zooming to nothing. */
+  zoomToFit(padding = 0.15): void {
+    const bounds = getSceneBounds(this.scene.sorted());
+    if (bounds === null) return;
+    if (this.viewport.fit(bounds, padding)) this.onViewportCommand();
   }
 
   fitToBounds(bounds: Bounds, padding?: number): void {
-    if (this.viewport.fit(bounds, padding)) this.markDirty();
+    if (this.viewport.fit(bounds, padding)) this.onViewportCommand();
+  }
+
+  private onViewportCommand(): void {
+    this.markDirty();
+    this.refreshSnapshot();
   }
 
   /* ── channel 1: discrete state, for useSyncExternalStore ────────────────── */
@@ -284,31 +363,35 @@ export class Engine {
    * The rounding is load-bearing. Zoom is a float that moves every frame during
    * a pinch; the *displayed* value is an integer percentage that changes maybe
    * thirty times across the same gesture. Comparing the rounded value collapses
-   * ~90 notifications into ~30 — and, more importantly, means a pan (which does
-   * not change zoom at all) produces exactly zero React renders.
+   * ~90 notifications into ~30 — and a pan, which does not change zoom at all,
+   * produces exactly zero React renders.
    */
   private refreshSnapshot(): void {
     const zoom = this.viewport.zoom;
-    const zoomPercent = Math.round(zoom * 100);
-    const canZoomIn = zoom < 30 - 1e-9;
-    const canZoomOut = zoom > 0.1 + 1e-9;
+    const next: EngineSnapshot = {
+      activeTool: this.tools.activeTool,
+      style: this.tools.getStyle(),
+      elementCount: this.scene.visibleCount,
+      zoomPercent: Math.round(zoom * 100),
+      canZoomIn: zoom < 30 - 1e-9,
+      canZoomOut: zoom > 0.1 + 1e-9,
+      panAffordance: this.panAffordance,
+    };
 
     const prev = this.snapshot;
     if (
-      prev.zoomPercent === zoomPercent &&
-      prev.canZoomIn === canZoomIn &&
-      prev.canZoomOut === canZoomOut &&
-      prev.panAffordance === this.panAffordance
+      prev.activeTool === next.activeTool &&
+      prev.style === next.style &&
+      prev.elementCount === next.elementCount &&
+      prev.zoomPercent === next.zoomPercent &&
+      prev.canZoomIn === next.canZoomIn &&
+      prev.canZoomOut === next.canZoomOut &&
+      prev.panAffordance === next.panAffordance
     ) {
-      return; // nothing React can see has changed — do not touch the reference
+      return; // nothing React can observe changed — do not touch the reference
     }
 
-    this.snapshot = {
-      zoomPercent,
-      canZoomIn,
-      canZoomOut,
-      panAffordance: this.panAffordance,
-    };
+    this.snapshot = next;
     for (const l of this.listeners) l();
   }
 
@@ -331,11 +414,25 @@ export class Engine {
       zoom: vp.zoom,
       scrollX: vp.scrollX,
       scrollY: vp.scrollY,
-      gridLines: this.lastRenderStats.gridLines,
+      render: this.lastRenderStats,
       idleFrames: this.idleFrames,
     };
     for (const l of this.frameListeners) l(info);
   }
 }
 
-export { DARK_THEME, LIGHT_THEME, type Theme };
+function get2d(
+  canvas: HTMLCanvasElement,
+  options: CanvasRenderingContext2DSettings,
+): CanvasRenderingContext2D {
+  const ctx = canvas.getContext('2d', options);
+  if (ctx === null) {
+    throw new Error(
+      'Could not acquire a 2D canvas context. This can happen in hardened ' +
+        'browser configurations or headless environments without a GPU.',
+    );
+  }
+  return ctx;
+}
+
+export { DARK_THEME, LIGHT_THEME, type Element, type ElementStyle, type Theme, type ToolType };

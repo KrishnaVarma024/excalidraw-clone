@@ -2,13 +2,15 @@ import { useCallback, useState } from 'react';
 import type { Engine } from '@engine/Engine';
 import { CanvasHost } from './CanvasHost';
 import { StatsOverlay } from './StatsOverlay';
+import { StylePanel } from './StylePanel';
+import { Toolbar } from './Toolbar';
 import { ZoomControls } from './ZoomControls';
 
 export function App() {
-  // The engine is created by CanvasHost, because it needs a real <canvas>
-  // element to exist first. It is reported back up so the chrome components
-  // can talk to it. `useState` rather than a ref: the chrome genuinely does
-  // need to render once when the engine appears.
+  // The engine is created by CanvasHost, because it needs real <canvas>
+  // elements to exist first. It is reported back up so the chrome can talk to
+  // it. `useState` rather than a ref: the chrome genuinely does need to render
+  // once when the engine appears.
   const [engine, setEngine] = useState<Engine | null>(null);
   const handleEngineReady = useCallback((e: Engine | null) => setEngine(e), []);
 
@@ -18,20 +20,22 @@ export function App() {
 
       {engine !== null && (
         <>
+          <Toolbar engine={engine} />
+          <StylePanel engine={engine} />
           <ZoomControls engine={engine} />
           <StatsOverlay engine={engine} />
         </>
       )}
 
       <div className="badge">
-        <strong>Phase 1 — infinite viewport.</strong>
+        <strong>Phase 2 — shapes and freehand.</strong>
         <br />
-        Two-finger scroll or <kbd>space</kbd>-drag to pan · pinch or <kbd>⌘</kbd>-scroll to zoom
-        at the cursor · <kbd>⌘</kbd>
-        <kbd>0</kbd> to reset.
+        Pick a tool (<kbd>R</kbd> <kbd>D</kbd> <kbd>O</kbd> <kbd>A</kbd> <kbd>L</kbd>{' '}
+        <kbd>P</kbd>) and drag · <kbd>shift</kbd> constrains to a square or 15°{' '}
+        · <kbd>esc</kbd> cancels mid-draw · <kbd>space</kbd>-drag still pans.
         <br />
-        The grid picks its own spacing as you zoom, and the frame counter should sit at zero
-        work while you are not touching anything.
+        No selection or undo yet — those are Phases 4 and 8. Watch{' '}
+        <em>drawn/total</em> as you pan: only what is on screen is ever drawn.
       </div>
     </div>
   );

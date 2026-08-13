@@ -21,11 +21,12 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 1 of 11 — infinite viewport.** Nothing to draw with yet, but the canvas is now an
-unbounded plane you can pan and zoom, rendered pixel-crisp on HiDPI displays.
+**Phase 2 of 11 — shapes and freehand.** It draws. Rectangles, diamonds, ellipses, lines,
+arrows and pressure-sensitive freehand, with a hand-drawn look via Rough.js.
 
-Two-finger scroll or <kbd>space</kbd>-drag to pan · pinch or ⌘-scroll to zoom at the cursor ·
-⌘0 to reset. The grid picks its own spacing as you zoom.
+Pick a tool (<kbd>R</kbd> <kbd>D</kbd> <kbd>O</kbd> <kbd>A</kbd> <kbd>L</kbd> <kbd>P</kbd>) and
+drag · <kbd>shift</kbd> constrains to a square or 15° · <kbd>esc</kbd> cancels mid-draw ·
+<kbd>space</kbd>-drag pans. No selection or undo yet — Phases 4 and 8.
 
 <!-- Updated at each phase. Benchmarks land in Phase 3 (baseline) and Phase 5 (result). -->
 
@@ -33,7 +34,7 @@ Two-finger scroll or <kbd>space</kbd>-drag to pan · pinch or ⌘-scroll to zoom
 |---:|---|---|
 | 0 | Scaffold, tooling, geometry primitives | ✅ |
 | 1 | Viewport: pan, zoom, DPR-correct rendering | ✅ |
-| 2 | Element model, shape and freehand tools | — |
+| 2 | Element model, shape and freehand tools | ✅ |
 | 3 | Performance instrumentation and baseline | — |
 | 4 | Quadtree spatial index, hit detection, selection | — |
 | 5 | Dirty-rectangle renderer | — |
@@ -49,9 +50,11 @@ Each phase is a pull request with the design reasoning in its description.
 
 | | |
 |---|---|
-| Frame cost while panning | **1.3–1.5 ms** p50 (empty scene, 1200×760 at dpr 2) |
-| Frames skipped while idle | **~64/sec** — the loop does no work at all when nothing changed |
-| React renders during a pan gesture | **0** |
+| Frame cost while drawing | **9.4 ms** p50 (1280×800 at dpr 2, 7 elements) |
+| Frames skipped while idle | **~59/sec** — the loop does no work at all when nothing changed |
+| React renders during a pan or draw gesture | **0** |
+| Rough.js drawable cache hit rate, warm | **100%** |
+| Culling: elements drawn after panning away | **1 of 7** — frame cost tracks what's visible |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -101,12 +104,14 @@ npm run build      # typecheck, then production bundle
 ```
 src/
   engine/          plain TypeScript. no React, no JSX.
+    scene/         the element model, the store, and bounds
     viewport/      the three coordinate spaces, and the transform between them
-    render/        the frame loop and the level-of-detail grid
-    input/         pointer, wheel and keyboard → viewport operations
-    util/          scalar maths, 2D geometry, ids, frame timing
-  react/           the UI chrome. mounts the canvas, then gets out of the way.
-tests/engine/      117 tests, all in Node. ~2.5s, no jsdom.
+    render/        the two renderers, the LOD grid, the drawable cache
+    tools/         the drawing state machine
+    input/         pointer, wheel and keyboard → tool or viewport
+    util/          scalar maths, 2D geometry, ids, frame timing, simplification
+  react/           the UI chrome. mounts the canvases, then gets out of the way.
+tests/engine/      194 tests, all in Node. ~3.7s, no jsdom.
 ```
 
 Directories arrive with the phase that fills them, rather than as empty placeholders. The target

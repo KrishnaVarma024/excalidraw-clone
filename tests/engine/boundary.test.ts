@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 /**
  * Architectural fitness test.
  *
- * The central claim of this project (ARCHITECTURE §1) is that the rendering
+ * The central claim of this project (ARCHITECTURE 1) is that the rendering
  * engine is independent of React. That claim is worth exactly as much as its
  * enforcement — and a convention that lives only in a document decays the first
  * time someone is in a hurry.
