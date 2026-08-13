@@ -21,15 +21,18 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 0 of 11 — project scaffold.** There is nothing to draw with yet. What's here is the
-build, the type system, the test harness, CI, and the geometry primitives everything else sits on.
+**Phase 1 of 11 — infinite viewport.** Nothing to draw with yet, but the canvas is now an
+unbounded plane you can pan and zoom, rendered pixel-crisp on HiDPI displays.
+
+Two-finger scroll or <kbd>space</kbd>-drag to pan · pinch or ⌘-scroll to zoom at the cursor ·
+⌘0 to reset. The grid picks its own spacing as you zoom.
 
 <!-- Updated at each phase. Benchmarks land in Phase 3 (baseline) and Phase 5 (result). -->
 
 | Phase | | Status |
 |---:|---|---|
 | 0 | Scaffold, tooling, geometry primitives | ✅ |
-| 1 | Viewport: pan, zoom, DPR-correct rendering | — |
+| 1 | Viewport: pan, zoom, DPR-correct rendering | ✅ |
 | 2 | Element model, shape and freehand tools | — |
 | 3 | Performance instrumentation and baseline | — |
 | 4 | Quadtree spatial index, hit detection, selection | — |
@@ -41,6 +44,19 @@ build, the type system, the test harness, CI, and the geometry primitives everyt
 | 10 | Hardening, benchmarks in CI, deploy | — |
 
 Each phase is a pull request with the design reasoning in its description.
+
+### Measured so far
+
+| | |
+|---|---|
+| Frame cost while panning | **1.3–1.5 ms** p50 (empty scene, 1200×760 at dpr 2) |
+| Frames skipped while idle | **~64/sec** — the loop does no work at all when nothing changed |
+| React renders during a pan gesture | **0** |
+| Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
+| Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
+
+Real numbers start mattering in Phase 3, which exists specifically to measure a slow scene
+before the quadtree and dirty-rectangle work make it fast.
 
 ---
 
@@ -84,10 +100,13 @@ npm run build      # typecheck, then production bundle
 
 ```
 src/
-  engine/          plain TypeScript. no React, no JSX, no DOM assumptions.
-    util/          scalar maths, 2D geometry, id generation
+  engine/          plain TypeScript. no React, no JSX.
+    viewport/      the three coordinate spaces, and the transform between them
+    render/        the frame loop and the level-of-detail grid
+    input/         pointer, wheel and keyboard → viewport operations
+    util/          scalar maths, 2D geometry, ids, frame timing
   react/           the UI chrome. mounts the canvas, then gets out of the way.
-tests/engine/      runs in Node. fast enough to keep in watch mode.
+tests/engine/      117 tests, all in Node. ~2.5s, no jsdom.
 ```
 
 Directories arrive with the phase that fills them, rather than as empty placeholders. The target
