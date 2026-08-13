@@ -21,21 +21,21 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 2 of 11 — shapes and freehand.** It draws. Rectangles, diamonds, ellipses, lines,
-arrows and pressure-sensitive freehand, with a hand-drawn look via Rough.js.
+**Phase 3 of 11 — the performance lab.** The app can now make itself slow on demand and say
+precisely where the time went. There is a seeded scene generator (100 / 1k / 10k / 50k), a
+per-stage frame breakdown, and a benchmark suite.
 
-Pick a tool (<kbd>R</kbd> <kbd>D</kbd> <kbd>O</kbd> <kbd>A</kbd> <kbd>L</kbd> <kbd>P</kbd>) and
-drag · <kbd>shift</kbd> constrains to a square or 15° · <kbd>esc</kbd> cancels mid-draw ·
-<kbd>space</kbd>-drag pans. No selection or undo yet — Phases 4 and 8.
+Nothing got faster in this phase. That's the point: the next two phases are optimisations, and
+an optimisation with no *before* number is a story rather than a result.
 
-<!-- Updated at each phase. Benchmarks land in Phase 3 (baseline) and Phase 5 (result). -->
+<!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
 | Phase | | Status |
 |---:|---|---|
 | 0 | Scaffold, tooling, geometry primitives | ✅ |
 | 1 | Viewport: pan, zoom, DPR-correct rendering | ✅ |
 | 2 | Element model, shape and freehand tools | ✅ |
-| 3 | Performance instrumentation and baseline | — |
+| 3 | Performance instrumentation and baseline | ✅ |
 | 4 | Quadtree spatial index, hit detection, selection | — |
 | 5 | Dirty-rectangle renderer | — |
 | 6 | Move, resize, rotate, multi-select | — |
@@ -46,6 +46,43 @@ drag · <kbd>shift</kbd> constrains to a square or 15° · <kbd>esc</kbd> cancel
 
 Each phase is a pull request with the design reasoning in its description.
 
+### The baseline, in one table
+
+The cull — the loop that decides which elements are on screen — is a linear scan today. From
+`npm run bench` on a MacBook Pro, Node 22:
+
+| Elements | Cull, mean | Relative | ms **per element** | Examined per frame |
+|---:|---:|---:|---:|---:|
+| 100 | 0.010 ms | 1× | 0.000099 | 100 |
+| 1,000 | 0.095 ms | 9.6× | 0.000095 | 1,000 |
+| 10,000 | 0.98 ms | 99× | 0.000098 | 10,000 |
+| 50,000 | 5.09 ms | **513×** | 0.000102 | 50,000 |
+
+**≈100 nanoseconds per element, per frame — flat across a 500× range.** That fourth column is what
+O(n) actually looks like when you measure it rather than assert it: a constant cost per item,
+holding to within 7% over two and a half orders of magnitude.
+
+At 50,000 elements the worst 1% of frames spend **15.7 ms** in the cull alone — 94% of a 60 fps
+budget, before a single pixel is rasterised.
+
+**But the growth curve isn't the real finding.** Here is the same 50,000-element scene culled at
+three different zoom levels:
+
+| Viewport | Elements visible | Cull, mean |
+|---|---:|---:|
+| zoomed in | a few dozen | 4.56 ms |
+| typical | a few hundred | 5.09 ms |
+| zoomed out | all 50,000 | 4.78 ms |
+
+Those are the same number. Culling 50,000 elements costs the same whether you can see forty of them
+or all of them — **the work is entirely unrelated to what you are looking at.** A structure that
+answers *"what is inside this rectangle?"* by examining objects nowhere near the rectangle is doing
+the wrong thing, however fast it does it. That is the defect Phase 4 fixes.
+
+And it is asserted, not eyeballed: [`tests/engine/culling.test.ts`](tests/engine/culling.test.ts)
+fails the build if the examined-count ever stops matching the element count — which is precisely
+what the quadtree is supposed to make happen.
+
 ### Measured so far
 
 | | |
@@ -54,12 +91,12 @@ Each phase is a pull request with the design reasoning in its description.
 | Frames skipped while idle | **~59/sec** — the loop does no work at all when nothing changed |
 | React renders during a pan or draw gesture | **0** |
 | Rough.js drawable cache hit rate, warm | **100%** |
-| Culling: elements drawn after panning away | **1 of 7** — frame cost tracks what's visible |
+| Culling ratio at 10k, zoomed in | **403 drawn / 10,001 tested** |
+| Cull cost per element | **~100 ns**, constant from 100 to 50,000 elements |
+| Cull growth, 100 → 50,000 elements | **513×** — linear, as designed, for now |
+| Cull cost at 50k, zoomed in vs out | **4.56 ms vs 4.78 ms** — the viewport doesn't matter yet |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
-
-Real numbers start mattering in Phase 3, which exists specifically to measure a slow scene
-before the quadtree and dirty-rectangle work make it fast.
 
 ---
 
@@ -94,8 +131,17 @@ npm run dev        # http://localhost:5173
 ```bash
 npm run verify     # typecheck + lint + test — the same gate CI runs
 npm run test       # vitest, Node environment, no jsdom
+npm run bench      # the cull benchmark. seconds, not milliseconds — not part of verify
 npm run build      # typecheck, then production bundle
 ```
+
+`bench` is deliberately outside `verify`. Its output is a property of the machine as much as of
+the code, and gating a build on a stopwatch is how you get a red CI run because a shared runner
+was busy. What CI *does* gate on is the deterministic element-examination count, which measures
+the same thing without a clock.
+
+To reproduce the baseline in the browser: `npm run dev`, then use the **performance lab** panel in
+the bottom-right to load 50k elements and watch the `cull` and `draw` rows diverge as you zoom.
 
 ---
 
@@ -109,9 +155,11 @@ src/
     render/        the two renderers, the LOD grid, the drawable cache
     tools/         the drawing state machine
     input/         pointer, wheel and keyboard → tool or viewport
+    dev/           the seeded scene generator — load-bearing for Phases 4 and 5
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      194 tests, all in Node. ~3.7s, no jsdom.
+tests/engine/      231 tests, all in Node. ~5s, no jsdom.
+tests/bench/       vitest bench. run on demand, never in CI.
 ```
 
 Directories arrive with the phase that fills them, rather than as empty placeholders. The target

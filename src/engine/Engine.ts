@@ -46,7 +46,15 @@ import { Scene } from './scene/Scene';
 import { getSceneBounds } from './scene/bounds';
 import { DEFAULT_STYLE, type Element, type ElementStyle } from './scene/element.types';
 import { TOOL_SHORTCUTS, ToolManager, type ToolType } from './tools/ToolManager';
-import { FrameTimer, type FrameStats, now } from './util/perf';
+import {
+  FrameTimer,
+  type FrameStats,
+  StageTimer,
+  type StageTimings,
+  ZERO_STAGES,
+  now,
+} from './util/perf';
+import { type GenerateOptions, generateScene } from './dev/generateScene';
 import type { Bounds } from './util/geometry';
 
 /** Discrete state React renders from. Changes rarely. */
@@ -60,6 +68,8 @@ export interface EngineSnapshot {
   readonly canZoomOut: boolean;
   /** Space held or a pan drag in progress — drives the cursor. */
   readonly panAffordance: boolean;
+  /** Whether User Timing marks are being emitted. Discrete: a toggle. */
+  readonly perfMarks: boolean;
 }
 
 /** Per-frame numbers. Delivered outside React. */
@@ -69,6 +79,14 @@ export interface FrameInfo {
   readonly scrollX: number;
   readonly scrollY: number;
   readonly render: RenderStats;
+  /**
+   * Where the frame went, split by stage.
+   *
+   * "The frame takes 40 ms" is not actionable. "The cull takes 38 of the 40"
+   * points at one function. This split is the whole reason Phase 3 exists as a
+   * phase rather than a footnote.
+   */
+  readonly stages: StageTimings;
   /** Frames skipped because nothing changed. High is good. */
   readonly idleFrames: number;
 }
@@ -82,6 +100,7 @@ export class Engine {
   private readonly tools: ToolManager;
   private readonly input: InputRouter;
   private readonly timer = new FrameTimer();
+  private readonly stages = new StageTimer();
 
   private rafId: number | null = null;
   private running = false;
@@ -103,8 +122,11 @@ export class Engine {
     gridLines: 0,
     drawn: 0,
     total: 0,
+    tested: 0,
     cacheHitRate: 1,
   };
+
+  private lastStages: StageTimings = ZERO_STAGES;
 
   private readonly listeners = new Set<() => void>();
   private readonly frameListeners = new Set<(info: FrameInfo) => void>();
@@ -128,6 +150,7 @@ export class Engine {
     canZoomIn: true,
     canZoomOut: true,
     panAffordance: false,
+    perfMarks: false,
   };
 
   private panAffordance = false;
@@ -240,16 +263,21 @@ export class Engine {
       return;
     }
 
+    this.stages.reset();
+
     if (this.needsStaticRender) {
       this.needsStaticRender = false;
-      this.lastRenderStats = this.renderer.render(this.viewport);
+      this.lastRenderStats = this.renderer.render(this.viewport, this.stages);
     }
 
     if (this.needsInteractiveRender) {
       this.needsInteractiveRender = false;
+      this.stages.begin('interactive');
       this.interactive.render(this.viewport, this.tools.draftElement);
+      this.stages.end('interactive');
     }
 
+    this.lastStages = this.stages.read();
     this.timer.record(frameStart, now());
     this.emitFrameInfo(frameStart);
   };
@@ -316,8 +344,49 @@ export class Engine {
   clearScene(): void {
     if (this.scene.visibleCount === 0) return;
     this.scene.clear();
+    this.scene.compact();
     this.renderer.cache.clear();
     this.refreshSnapshot();
+  }
+
+  /* ── the performance lab (Phase 3) ──────────────────────────────────────── */
+
+  /**
+   * Replace the scene with `count` generated elements and frame them.
+   *
+   * This is a development affordance, not a feature — but it is the affordance
+   * the next two phases are built on. Neither the quadtree nor the
+   * dirty-rectangle renderer is worth claiming without a before number, and you
+   * cannot get a before number without a scene big enough to hurt.
+   *
+   * `load()` rather than repeated `add()`: 50,000 individual adds would emit
+   * 50,000 change notifications and rebuild the z-sort cache 50,000 times,
+   * which takes long enough to look like a hang.
+   */
+  generateScene(options: GenerateOptions): string {
+    const { elements, descriptor } = generateScene(options);
+    this.scene.load(elements);
+    this.renderer.cache.clear();
+    this.zoomToFit();
+    this.markDirty();
+    this.refreshSnapshot();
+    return descriptor;
+  }
+
+  /**
+   * Turn on `performance.mark`/`measure` so a DevTools trace shows named
+   * regions instead of an undifferentiated block of `render`.
+   *
+   * Opt-in because the entries allocate and are retained until cleared — left
+   * on permanently they cost more than the stages they measure.
+   */
+  setPerfMarks(enabled: boolean): void {
+    this.stages.setMarksEnabled(enabled);
+    this.refreshSnapshot();
+  }
+
+  get perfMarksEnabled(): boolean {
+    return this.stages.isMarking;
   }
 
   zoomIn(): void {
@@ -376,6 +445,7 @@ export class Engine {
       canZoomIn: zoom < 30 - 1e-9,
       canZoomOut: zoom > 0.1 + 1e-9,
       panAffordance: this.panAffordance,
+      perfMarks: this.stages.isMarking,
     };
 
     const prev = this.snapshot;
@@ -386,7 +456,8 @@ export class Engine {
       prev.zoomPercent === next.zoomPercent &&
       prev.canZoomIn === next.canZoomIn &&
       prev.canZoomOut === next.canZoomOut &&
-      prev.panAffordance === next.panAffordance
+      prev.panAffordance === next.panAffordance &&
+      prev.perfMarks === next.perfMarks
     ) {
       return; // nothing React can observe changed — do not touch the reference
     }
@@ -415,6 +486,7 @@ export class Engine {
       scrollX: vp.scrollX,
       scrollY: vp.scrollY,
       render: this.lastRenderStats,
+      stages: this.lastStages,
       idleFrames: this.idleFrames,
     };
     for (const l of this.frameListeners) l(info);

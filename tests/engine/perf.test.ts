@@ -1,5 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { FrameTimer, percentileOfSorted } from '@engine/util/perf';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  FrameTimer,
+  STAGE_NAMES,
+  StageTimer,
+  ZERO_STAGES,
+  percentileOfSorted,
+} from '@engine/util/perf';
 
 describe('percentileOfSorted', () => {
   const sorted = Array.from({ length: 100 }, (_, i) => i + 1); // 1…100
@@ -107,5 +113,148 @@ describe('FrameTimer', () => {
     for (let i = 0; i < 50; i++) t.record(i * 16, i * 16 + 9);
     t.reset();
     expect(t.stats().samples).toBe(0);
+  });
+});
+
+describe('StageTimer', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Drive the clock explicitly.
+   *
+   * A timing test that calls the real clock and asserts "greater than zero" is
+   * a test that can only fail by being flaky. Feeding a known sequence makes the
+   * arithmetic itself the thing under test, which is the only part that can
+   * actually be wrong.
+   */
+  function fakeClock(values: number[]): void {
+    let i = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => values[i++] ?? 0);
+  }
+
+  it('starts at zero for every stage', () => {
+    expect(new StageTimer().read()).toEqual(ZERO_STAGES);
+  });
+
+  it('measures the span between begin and end', () => {
+    fakeClock([10, 15]);
+    const t = new StageTimer();
+    t.begin('cull');
+    t.end('cull');
+    expect(t.read().cull).toBeCloseTo(5, 9);
+  });
+
+  it('ACCUMULATES when a stage runs twice in one frame', () => {
+    // `+=` rather than `=`. Phase 5 renders several dirty rectangles per frame,
+    // each with its own draw pass; reporting only the last one would understate
+    // the frame by however many rectangles there were — and would understate it
+    // more the worse things got.
+    fakeClock([10, 15, 100, 103]);
+    const t = new StageTimer();
+    t.begin('cull');
+    t.end('cull');
+    t.begin('cull');
+    t.end('cull');
+    expect(t.read().cull).toBeCloseTo(8, 9);
+  });
+
+  it('keeps stages independent', () => {
+    fakeClock([0, 4, 4, 20]);
+    const t = new StageTimer();
+    t.begin('cull');
+    t.end('cull');
+    t.begin('draw');
+    t.end('draw');
+
+    const read = t.read();
+    expect(read.cull).toBeCloseTo(4, 9);
+    expect(read.draw).toBeCloseTo(16, 9);
+    expect(read.grid).toBe(0);
+  });
+
+  it('zeroes on reset, so a frame never inherits the previous one', () => {
+    fakeClock([0, 9]);
+    const t = new StageTimer();
+    t.begin('draw');
+    t.end('draw');
+    t.reset();
+    expect(t.read()).toEqual(ZERO_STAGES);
+  });
+
+  it('returns a copy, not the live accumulator', () => {
+    // `FrameInfo` hands this object to every listener. Handing out the internal
+    // record would let a listener corrupt the next frame's numbers, and the
+    // resulting bug would look like a rendering problem.
+    const t = new StageTimer();
+    const first = t.read();
+    (first as Record<string, number>)['cull'] = 999;
+    expect(t.read().cull).toBe(0);
+  });
+
+  describe('User Timing marks', () => {
+    it('is off by default, because the entries allocate and are retained', () => {
+      const mark = vi.spyOn(performance, 'mark');
+      const t = new StageTimer();
+      t.begin('grid');
+      t.end('grid');
+
+      expect(t.isMarking).toBe(false);
+      expect(mark).not.toHaveBeenCalled();
+    });
+
+    it('emits named marks and a measure when enabled', () => {
+      const mark = vi.spyOn(performance, 'mark');
+      const measure = vi.spyOn(performance, 'measure');
+
+      const t = new StageTimer();
+      t.setMarksEnabled(true);
+      t.begin('grid');
+      t.end('grid');
+
+      expect(mark).toHaveBeenCalledWith('grid:start');
+      expect(mark).toHaveBeenCalledWith('grid:end');
+      expect(measure).toHaveBeenCalledWith('grid', 'grid:start', 'grid:end');
+    });
+
+    it('clears the performance buffer when switched off', () => {
+      // Entries accumulate until cleared, and a long session with marks left on
+      // eventually evicts its own earlier entries — silently, so the part of the
+      // trace you wanted is the part that is missing.
+      const clearMarks = vi.spyOn(performance, 'clearMarks');
+      const clearMeasures = vi.spyOn(performance, 'clearMeasures');
+
+      const t = new StageTimer();
+      t.setMarksEnabled(true);
+      t.setMarksEnabled(false);
+
+      expect(clearMarks).toHaveBeenCalled();
+      expect(clearMeasures).toHaveBeenCalled();
+    });
+
+    it('survives a measure() that throws', () => {
+      // A missing start mark makes `measure` throw. The measurement is
+      // diagnostic; the rendering is not. Losing a frame to an instrumentation
+      // error would be the instrument causing the outage.
+      vi.spyOn(performance, 'measure').mockImplementation(() => {
+        throw new Error('no such mark');
+      });
+
+      const t = new StageTimer();
+      t.setMarksEnabled(true);
+      expect(() => {
+        t.begin('draw');
+        t.end('draw');
+      }).not.toThrow();
+    });
+  });
+
+  it('lists every stage in STAGE_NAMES', () => {
+    // An architectural fitness test. `STAGE_NAMES` is what the overlay iterates
+    // to build its rows; add a stage to the union, forget to add it here, and
+    // the stage is measured perfectly and never displayed — the worst kind of
+    // instrumentation bug, because everything looks fine.
+    expect([...STAGE_NAMES].sort()).toEqual(Object.keys(ZERO_STAGES).sort());
   });
 });

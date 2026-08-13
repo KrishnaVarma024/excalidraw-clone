@@ -182,6 +182,97 @@ canvas {
   font-variant-numeric: tabular-nums;
 }
 
+.stats-section {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  opacity: 0.8;
+}
+
+.stats-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+/* ── Dev panel (Phase 3) ──────────────────────────────────────────────────── */
+
+.dev-panel {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 8%);
+  font-size: 11px;
+  z-index: 10;
+}
+
+.dev-title {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.dev-row {
+  display: flex;
+  gap: 4px;
+}
+
+.dev-row .seg {
+  font-variant-numeric: tabular-nums;
+}
+
+.dev-row .seg:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dev-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  cursor: pointer;
+  color: var(--fg);
+  line-height: 1.4;
+}
+
+.dev-check input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.dev-check small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.dev-note {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  /* Descriptors are long and must not widen the panel. */
+  overflow-wrap: anywhere;
+}
+
 /* ── Canvas layers ────────────────────────────────────────────────────────── */
 
 /* Two canvases stacked in the same box. The static one holds committed elements

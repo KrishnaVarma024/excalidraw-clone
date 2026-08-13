@@ -39,11 +39,20 @@
     "noUnusedParameters": true,
     "forceConsistentCasingInFileNames": true,
 
-    /* ---- Paths ------------------------------------------------------- */
-    "baseUrl": ".",
+    /* ---- Paths ------------------------------------------------------- *
+     * Deliberately no `baseUrl`. TypeScript 6 deprecates it (TS5101) and 7
+     * removes it; since 4.1 `paths` works without it, resolved relative to this
+     * file — which is what we meant all along. The entries below must therefore
+     * be written `./src/...`; a bare `src/...` is now an error (TS5090).
+     *
+     * Dropping it is a fix, not a workaround. `baseUrl` also made every folder
+     * under `.` importable as a bare specifier, so `import … from
+     * 'src/engine/scene/Scene'` type-checked and then failed at runtime,
+     * because Vite resolves only the two aliases in vite.config.ts. Removing it
+     * makes the type-checker and the bundler agree on what exists. */
     "paths": {
-      "@engine/*": ["src/engine/*"],
-      "@react/*": ["src/react/*"]
+      "@engine/*": ["./src/engine/*"],
+      "@react/*": ["./src/react/*"]
     }
   },
   "include": ["src", "tests", "vite.config.ts", "eslint.config.js"]

@@ -27,6 +27,7 @@ import type { Scene } from '../scene/Scene';
 import { type GridStyle, drawGrid } from './grid';
 import { createRoughCanvas, drawElement } from './drawElement';
 import { RoughCache } from './roughCache';
+import type { StageTimer } from '../util/perf';
 import type { RoughCanvas } from 'roughjs/bin/canvas';
 
 export interface RenderStats {
@@ -36,6 +37,14 @@ export interface RenderStats {
   drawn: number;
   /** Live elements in the scene. `drawn / total` is the culling ratio. */
   total: number;
+  /**
+   * Elements *examined* by the cull.
+   *
+   * Equal to `total` under a linear scan; Phase 4's quadtree makes it grow
+   * logarithmically instead. It is the headline number of this project, and it
+   * is deterministic — unlike a timing, it reads the same on every machine.
+   */
+  tested: number;
   /** Rough.js drawable cache hit rate, 0…1. Sits at ~1 once warm. */
   cacheHitRate: number;
 }
@@ -80,7 +89,7 @@ export class Renderer {
     this.theme = theme;
   }
 
-  render(vp: Viewport): RenderStats {
+  render(vp: Viewport, stages: StageTimer): RenderStats {
     const { ctx } = this;
     const dpr = vp.devicePixelRatio;
     const cssW = vp.width;
@@ -101,7 +110,9 @@ export class Renderer {
        DPR only. The grid positions itself using the viewport transform but
        strokes 1-CSS-pixel lines, so it stays crisp at every zoom. */
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    stages.begin('grid');
     const gridLines = drawGrid(ctx, vp.get(), cssW, cssH, this.theme.grid);
+    stages.end('grid');
 
     /* ── 3. Content, in SCENE space ────────────────────────────────────────
        From here on every draw call is in raw scene coordinates. Nothing below
@@ -109,10 +120,25 @@ export class Renderer {
     const m = vp.deviceMatrix();
     ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
 
+    /* Cull and draw are timed separately because they scale differently, and
+       confusing them is how you optimise the wrong thing.
+
+         cull  is O(total)   — it grows with everything you have ever drawn
+         draw  is O(visible) — it grows with what fits on the screen
+
+       At 50,000 elements zoomed in on a corner, `draw` is trivial and `cull` is
+       the entire frame. Phase 4's quadtree attacks only the first number. If
+       these were reported as one figure you could halve the cull and watch the
+       total barely move, with no idea why. */
+    stages.begin('cull');
     const visible = this.scene.visible(vp.visibleSceneBounds());
+    stages.end('cull');
+
+    stages.begin('draw');
     for (const el of visible) {
       drawElement(ctx, this.rough, this.cache, el);
     }
+    stages.end('draw');
 
     const { hits, misses } = this.cache.stats();
     const lookups = hits + misses;
@@ -121,6 +147,7 @@ export class Renderer {
       gridLines,
       drawn: visible.length,
       total: this.scene.visibleCount,
+      tested: this.scene.queryStats.tested,
       cacheHitRate: lookups === 0 ? 1 : hits / lookups,
     };
   }
