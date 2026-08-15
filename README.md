@@ -21,13 +21,13 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 4a of 11 — the spatial index.** The O(n) viewport cull is now a re-rooting quadtree,
-plus a choice between three strategies made per query — because the index is not unconditionally
-better, and shipping it everywhere was a measured 2.8× regression.
+**Phase 4b of 11 — hit detection and selection.** Click, shift-click, rubber-band, select-all,
+delete. Built on the Phase 4a index, which is what makes it possible at all.
 
-At 50,000 elements, one scene, one frame: framing the whole drawing costs **45.6 ms** in the cull;
-zooming into a corner costs **0.30 ms**. Same data, 152× apart, decided by which strategy the
-viewport makes cheapest.
+Hit testing runs on every `pointermove` — 120–240 Hz on a trackpad — not once per frame. At 50,000
+elements a linear scan over blank canvas takes **13.3 ms per event**; at 240 Hz that is 3× more
+work than there is time, which is not a slow app but a frozen pointer. Through the index it is
+**0.0002 ms**, and flat from 100 elements to 50,000.
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -38,7 +38,7 @@ viewport makes cheapest.
 | 2 | Element model, shape and freehand tools | ✅ |
 | 3 | Performance instrumentation and baseline | ✅ |
 | 4a | Quadtree spatial index | ✅ |
-| 4b | Hit detection and selection | — |
+| 4b | Hit detection and selection | ✅ |
 | 5 | Dirty-rectangle renderer | — |
 | 6 | Move, resize, rotate, multi-select | — |
 | 7 | Text | — |
@@ -47,6 +47,23 @@ viewport makes cheapest.
 | 10 | Hardening, benchmarks in CI, deploy | — |
 
 Each phase is a pull request with the design reasoning in its description.
+
+### What the index is really for
+
+The render cull was the visible win. Hit testing is the one that decides whether the app is usable,
+because it runs per pointer event rather than per frame. `npm run bench`, 50,000 elements:
+
+| | linear scan | through the index | |
+|---|---:|---:|---:|
+| click in a busy area | 6.73 ms | **0.061 ms** | 111× |
+| move over empty canvas | 13.28 ms | **0.0002 ms** | ~66,000× |
+
+The second row is the one people forget to measure, because "nothing happened". It is also the
+worst case: with nothing to hit, the scan cannot exit early and must test all 50,000 shapes
+exactly. Through the index it is *flat* — 0.0002 ms at 100 elements and at 50,000 — because the
+first node rejects everything.
+
+In the running app at 50,000 elements, a click hands the exact geometry test **3 candidates**.
 
 ### What the index actually bought
 
@@ -110,6 +127,9 @@ pessimisation in the common path."* It then caught exactly that.
 | Index nodes descended into at 50k | **31** — 1.8× the count at 500 elements |
 | Cull at 50k with everything on screen | **O(1)** — containment proved once, cached array returned |
 | Share of the old cull that was bounds recomputation | **~90%** (17.7 ms vs 1.8 ms per 50k) |
+| Hit test at 50k, busy area | **6.73 ms → 0.061 ms** (111×) |
+| Hit test at 50k, empty canvas | **13.28 ms → 0.0002 ms**, and flat in scene size |
+| Broad-phase candidates per click at 50k | **3** |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -174,7 +194,7 @@ src/
     spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      260 tests, all in Node. ~5s, no jsdom.
+tests/engine/      309 tests, all in Node. ~7s, no jsdom.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 

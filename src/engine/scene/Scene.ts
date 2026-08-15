@@ -28,10 +28,11 @@
  * for a list that usually has not changed.
  */
 
-import type { Bounds } from '../util/geometry';
+import type { Bounds, Point } from '../util/geometry';
 import { boundsArea, boundsContains, boundsIntersect, unionBounds } from '../util/geometry';
 import { QuadTree, type QuadTreeStats } from '../spatial/QuadTree';
-import { getRenderBounds } from './bounds';
+import { getRenderBounds, getRotatedBounds } from './bounds';
+import { hitTestBox, hitTestElement } from './hitTest';
 import type { Element, ElementId } from './element.types';
 
 /** What changed, so the renderer can decide what to repaint. */
@@ -82,6 +83,16 @@ export type QueryPath =
 export const SCAN_AREA_RATIO = 0.25;
 
 const EMPTY: readonly Element[] = [];
+
+/** Work performed by a hit test. The broad/narrow split, made countable. */
+export interface HitStats {
+  /** Candidates the broad phase examined — the quadtree's `tested`. */
+  readonly broad: number;
+  /** Candidates that survived to an exact geometry test. */
+  readonly narrow: number;
+  /** Whether anything was hit. */
+  readonly hit: boolean;
+}
 
 /** Work performed by a spatial query. See `Scene.queryStats`. */
 export interface QueryStats {
@@ -155,6 +166,7 @@ export class Scene {
   private contentBounds: Bounds | null = null;
 
   private lastQuery: QueryStats = { tested: 0, returned: 0, nodes: 0, path: 'all' };
+  private lastHit: HitStats = { broad: 0, narrow: 0, hit: false };
 
   /* ── reading ────────────────────────────────────────────────────────────── */
 
@@ -278,6 +290,129 @@ export class Scene {
       nodes: work.nodes,
       path: 'index',
     };
+    return out;
+  }
+
+  /* ── hit testing ────────────────────────────────────────────────────────── */
+
+  /**
+   * The topmost element under `point`, or null.
+   *
+   * ── Why this is the method the quadtree was really built for ──────────────
+   *
+   * The render cull runs once per *frame* — 60 Hz, and only when something
+   * changed. This runs once per `pointermove`, which a trackpad emits at
+   * 120–240 Hz, and it runs whether or not anything changed, because the answer
+   * is what decides the cursor and the hover highlight.
+   *
+   * A linear scan with an exact geometry test per element is 30–80 ms at 50,000
+   * elements (ARCHITECTURE §5.1). At 240 Hz that is not a slow app, it is a
+   * frozen one. Phase 4a's index turns the candidate list into a handful before
+   * any real geometry runs.
+   *
+   * ── Two phases, and why the order matters ─────────────────────────────────
+   *
+   *   broad   the index, rectangles only, over-inclusive by design
+   *   narrow  `hitTestElement`, exact, in reverse z-order, first hit wins
+   *
+   * Reverse z-order is not a detail: the topmost element is the one the user
+   * believes they clicked, and it is the one drawn last. Iterating forwards
+   * returns whatever is *underneath*, which reads as "clicks go through shapes"
+   * and is maddening to use.
+   *
+   * @param threshold tolerance in scene units. Callers pass `k / zoom` so a thin
+   *   line stays equally clickable at every zoom level.
+   */
+  hitTest(point: Point, threshold: number): Readonly<Element> | null {
+    const candidates = this.candidatesAt(point, threshold);
+
+    // Descending z: the last thing drawn is the first thing hit.
+    candidates.sort((a, b) => b.zIndex - a.zIndex);
+
+    let narrow = 0;
+    for (const el of candidates) {
+      narrow++;
+      if (hitTestElement(el, point, threshold)) {
+        this.lastHit = { broad: candidates.length, narrow, hit: true };
+        return el;
+      }
+    }
+
+    this.lastHit = { broad: candidates.length, narrow, hit: false };
+    return null;
+  }
+
+  /**
+   * Every element under `point`, topmost first.
+   *
+   * Used by alt-click-to-cycle in Phase 6, and by the tests, which want to
+   * assert the full stack rather than just the winner.
+   */
+  hitTestAll(point: Point, threshold: number): Readonly<Element>[] {
+    const hits = this.candidatesAt(point, threshold).filter((el) =>
+      hitTestElement(el, point, threshold),
+    );
+    hits.sort((a, b) => b.zIndex - a.zIndex);
+    return hits;
+  }
+
+  /**
+   * Elements a marquee touches, in ascending z-order.
+   *
+   * No narrow phase worth the name — a marquee is a rectangle and so are the
+   * candidates' bounds, so the broad phase's own test is already the right one.
+   * The only refinement is testing against rotated bounds rather than render
+   * bounds, so a shape is not selected because the marquee clipped its stroke
+   * padding.
+   */
+  elementsInBox(box: Bounds): Readonly<Element>[] {
+    const out: Element[] = [];
+    for (const entry of this.index.query(box)) {
+      const el = this.elements.get(entry.id);
+      if (el !== undefined && hitTestBox(el, box)) out.push(el);
+    }
+    out.sort((a, b) => a.zIndex - b.zIndex);
+    return out;
+  }
+
+  /** Union of the geometry-ish bounds of a set of ids. Null when none exist. */
+  boundsOf(ids: Iterable<ElementId>): Bounds | null {
+    let acc: Bounds | null = null;
+    for (const id of ids) {
+      const el = this.elements.get(id);
+      if (el === undefined || el.isDeleted) continue;
+      const b = getRotatedBounds(el);
+      acc = acc === null ? b : unionBounds(acc, b);
+    }
+    return acc;
+  }
+
+  /** Work done by the last `hitTest`. The broad/narrow ratio is the headline. */
+  get hitStats(): Readonly<HitStats> {
+    return this.lastHit;
+  }
+
+  /**
+   * Broad phase: everything whose indexed rectangle is within `threshold`.
+   *
+   * The query box is the point grown by the threshold. That is correct *because*
+   * the index stores render bounds, which are already padded by stroke width and
+   * Rough.js jitter — so a shape whose drawn pixels reach the cursor is a
+   * candidate even when its geometry does not.
+   */
+  private candidatesAt(point: Point, threshold: number): Element[] {
+    const box: Bounds = {
+      minX: point.x - threshold,
+      minY: point.y - threshold,
+      maxX: point.x + threshold,
+      maxY: point.y + threshold,
+    };
+
+    const out: Element[] = [];
+    for (const entry of this.index.query(box)) {
+      const el = this.elements.get(entry.id);
+      if (el !== undefined && !el.isDeleted) out.push(el);
+    }
     return out;
   }
 

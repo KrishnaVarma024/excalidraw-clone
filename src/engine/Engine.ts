@@ -39,13 +39,14 @@
  */
 
 import { DARK_THEME, LIGHT_THEME, Renderer, type RenderStats, type Theme } from './render/Renderer';
-import { InteractiveRenderer } from './render/InteractiveRenderer';
+import { InteractiveRenderer, type SelectionOverlay } from './render/InteractiveRenderer';
 import { InputRouter, type InputDelegate, type PointerInfo } from './input/InputRouter';
 import { Viewport } from './viewport/Viewport';
-import { Scene } from './scene/Scene';
+import { Scene, type HitStats } from './scene/Scene';
 import { getSceneBounds } from './scene/bounds';
 import { DEFAULT_STYLE, type Element, type ElementStyle } from './scene/element.types';
 import { TOOL_SHORTCUTS, ToolManager, type ToolType } from './tools/ToolManager';
+import { Selection } from './tools/Selection';
 import {
   FrameTimer,
   type FrameStats,
@@ -70,6 +71,8 @@ export interface EngineSnapshot {
   readonly panAffordance: boolean;
   /** Whether User Timing marks are being emitted. Discrete: a toggle. */
   readonly perfMarks: boolean;
+  /** How many elements are selected. Discrete, and drives the whole selection UI. */
+  readonly selectedCount: number;
 }
 
 /** Per-frame numbers. Delivered outside React. */
@@ -87,13 +90,44 @@ export interface FrameInfo {
    * phase rather than a footnote.
    */
   readonly stages: StageTimings;
+  /**
+   * Work done by the most recent hit test.
+   *
+   * Not a per-frame value — it changes on pointer events, not on rAF — but it
+   * rides the same channel because it is read the same way: a number a human
+   * glances at, that must not cost a React render to display.
+   */
+  readonly hit: HitStats;
   /** Frames skipped because nothing changed. High is good. */
   readonly idleFrames: number;
 }
 
+/**
+ * Click tolerance in SCREEN pixels.
+ *
+ * Divided by zoom before it reaches the hit test, so the slop is constant on
+ * screen rather than in the document. A fixed scene-space tolerance would make a
+ * 1px line nearly unclickable at 10% zoom and give it a fat invisible halo at
+ * 3000% — the tolerance exists for the human's aim, and the human is looking at
+ * pixels.
+ */
+const HIT_SLOP_PX = 10;
+
+/**
+ * Above this many selected elements, draw only the group box, not per-element
+ * outlines.
+ *
+ * Select-all on a 50,000-element scene would otherwise stroke 50,000 dashed
+ * rectangles on the interactive layer every frame — which is exactly the
+ * "cost grows with the document" problem the two-canvas split exists to
+ * prevent, reintroduced through the back door.
+ */
+const MAX_SELECTION_OUTLINES = 200;
+
 export class Engine {
   readonly viewport = new Viewport();
   readonly scene = new Scene();
+  readonly selection = new Selection();
 
   private readonly renderer: Renderer;
   private readonly interactive: InteractiveRenderer;
@@ -130,6 +164,16 @@ export class Engine {
 
   private lastStages: StageTimings = ZERO_STAGES;
 
+  /**
+   * Bounding box of the selection, cached.
+   *
+   * Recomputed when the selection or the scene changes, not per frame. With
+   * everything selected in a 50,000-element scene, computing it every frame is
+   * 50,000 rotated-bounds calculations for a rectangle that has not moved.
+   */
+  private selectionBounds: Bounds | null = null;
+  private selectionBoundsDirty = true;
+
   private readonly listeners = new Set<() => void>();
   private readonly frameListeners = new Set<(info: FrameInfo) => void>();
 
@@ -153,6 +197,7 @@ export class Engine {
     canZoomOut: true,
     panAffordance: false,
     perfMarks: false,
+    selectedCount: 0,
   };
 
   private panAffordance = false;
@@ -174,9 +219,14 @@ export class Engine {
     this.renderer.setTheme(theme);
     this.interactive = new InteractiveRenderer(interactiveCtx, interactiveCanvas);
 
-    this.tools = new ToolManager(this.scene, DEFAULT_STYLE, {
+    this.tools = new ToolManager(this.scene, this.selection, DEFAULT_STYLE, {
       onDraftChange: () => {
         this.needsInteractiveRender = true;
+      },
+      onSelectionChange: () => {
+        this.needsInteractiveRender = true;
+        this.selectionBoundsDirty = true;
+        this.refreshSnapshot();
       },
       onCommit: () => {
         this.needsStaticRender = true;
@@ -190,6 +240,9 @@ export class Engine {
     // a moved element contributes both — where it was and where it is.
     this.scene.subscribe(() => {
       this.needsStaticRender = true;
+      // A moved or deleted element changes where the selection outline goes.
+      this.selectionBoundsDirty = true;
+      this.needsInteractiveRender = true;
     });
 
     // Pointer events go on the *interactive* canvas: it is on top, so it is what
@@ -216,13 +269,32 @@ export class Engine {
   /** Bridge between the input router's protocol and the tool manager's. */
   private delegate(): InputDelegate {
     return {
-      onPointerDown: (info: PointerInfo) => this.tools.onPointerDown(info.scene, info),
-      onPointerMove: (info: PointerInfo) => this.tools.onPointerMove(info.scene, info),
+      onPointerDown: (info: PointerInfo) =>
+        this.tools.onPointerDown(info.scene, { ...info, hitThreshold: this.hitThreshold() }),
+      onPointerMove: (info: PointerInfo) =>
+        this.tools.onPointerMove(info.scene, { ...info, hitThreshold: this.hitThreshold() }),
       onPointerUp: () => {
         this.tools.onPointerUp();
       },
       onCancel: () => this.tools.cancel(),
       onKeyDown: (e: KeyboardEvent) => {
+        // Selection commands first: they are modal, and a bare `a` must select
+        // all rather than being swallowed by a tool shortcut it does not match.
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'a') {
+          this.tools.selectAll();
+          return true;
+        }
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          this.tools.deleteSelected();
+          // Consumed even when nothing was selected: an unhandled Backspace is
+          // a browser navigation gesture in some configurations, and losing the
+          // canvas to a history-back is not a recoverable mistake.
+          return true;
+        }
+
+        // A modifier held with a letter is a browser or OS shortcut, not ours.
+        if (e.metaKey || e.ctrlKey || e.altKey) return false;
+
         const tool = TOOL_SHORTCUTS[e.key.toLowerCase()];
         if (tool === undefined) return false;
         this.setTool(tool);
@@ -275,7 +347,7 @@ export class Engine {
     if (this.needsInteractiveRender) {
       this.needsInteractiveRender = false;
       this.stages.begin('interactive');
-      this.interactive.render(this.viewport, this.tools.draftElement);
+      this.interactive.render(this.viewport, this.tools.draftElement, this.overlay());
       this.stages.end('interactive');
     }
 
@@ -293,6 +365,42 @@ export class Engine {
    * handler instead is the single most common reason canvas apps feel worse
    * than they should.
    */
+  /** Click tolerance in scene units: constant on screen, whatever the zoom. */
+  private hitThreshold(): number {
+    return HIT_SLOP_PX / this.viewport.zoom;
+  }
+
+  /**
+   * What the interactive layer draws on top of the draft.
+   *
+   * Outlines are computed from what is **on screen**, not from the whole
+   * selection: an outline you cannot see costs the same to stroke as one you
+   * can. `elementsInBox` is an index query, so this tracks the viewport rather
+   * than the document — the entire point of Phase 4a, reused.
+   */
+  private overlay(): SelectionOverlay {
+    if (this.selectionBoundsDirty) {
+      this.selectionBounds = this.scene.boundsOf(this.selection.ids());
+      this.selectionBoundsDirty = false;
+    }
+
+    const count = this.selection.size;
+    const outlines =
+      count === 0 || count > MAX_SELECTION_OUTLINES
+        ? []
+        : this.scene
+            .elementsInBox(this.viewport.visibleSceneBounds())
+            .filter((el) => this.selection.has(el.id));
+
+    return {
+      outlines,
+      // One box round a single element is the same rectangle twice. Only show
+      // the group box when it is actually grouping something.
+      groupBounds: count > 1 ? this.selectionBounds : null,
+      marquee: this.tools.marqueeBox,
+    };
+  }
+
   markDirty(): void {
     this.needsStaticRender = true;
     this.needsInteractiveRender = true;
@@ -348,7 +456,18 @@ export class Engine {
     this.scene.clear();
     this.scene.compact();
     this.renderer.cache.clear();
+    this.selection.clear();
+    this.selectionBoundsDirty = true;
     this.refreshSnapshot();
+  }
+
+  /** Delete the selection. Exposed for the toolbar; the keyboard path is above. */
+  deleteSelected(): number {
+    return this.tools.deleteSelected();
+  }
+
+  selectAll(): boolean {
+    return this.tools.selectAll();
   }
 
   /* ── the performance lab (Phase 3) ──────────────────────────────────────── */
@@ -448,6 +567,7 @@ export class Engine {
       canZoomOut: zoom > 0.1 + 1e-9,
       panAffordance: this.panAffordance,
       perfMarks: this.stages.isMarking,
+      selectedCount: this.selection.size,
     };
 
     const prev = this.snapshot;
@@ -459,7 +579,8 @@ export class Engine {
       prev.canZoomIn === next.canZoomIn &&
       prev.canZoomOut === next.canZoomOut &&
       prev.panAffordance === next.panAffordance &&
-      prev.perfMarks === next.perfMarks
+      prev.perfMarks === next.perfMarks &&
+      prev.selectedCount === next.selectedCount
     ) {
       return; // nothing React can observe changed — do not touch the reference
     }
@@ -489,6 +610,7 @@ export class Engine {
       scrollY: vp.scrollY,
       render: this.lastRenderStats,
       stages: this.lastStages,
+      hit: this.scene.hitStats,
       idleFrames: this.idleFrames,
     };
     for (const l of this.frameListeners) l(info);

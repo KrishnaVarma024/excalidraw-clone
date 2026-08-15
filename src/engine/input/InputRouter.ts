@@ -304,7 +304,16 @@ export class InputRouter {
           if (this.viewport.resetZoom()) this.cb.onViewportChange();
           return;
         default:
-          return; // leave every other modifier combo to the browser
+          /* Give the tool first refusal, then leave it to the browser.
+           *
+           * This used to `return` unconditionally, which was fine until Phase 4b
+           * added ⌘A / Ctrl+A for select-all — the handler existed, was wired up,
+           * and could never fire, because the event never got here. Offering the
+           * delegate the event and only calling `preventDefault` when it says it
+           * consumed the key keeps the original intent (unclaimed combos belong
+           * to the browser) without the dead branch. */
+          if (this.delegate.onKeyDown(e)) e.preventDefault();
+          return;
       }
     }
 

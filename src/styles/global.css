@@ -199,6 +199,55 @@ canvas {
   border-top: 0;
 }
 
+/* ── Selection bar (Phase 4b) ─────────────────────────────────────────────── */
+
+.selection-bar {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 10%);
+  font-size: 12px;
+  z-index: 10;
+}
+
+.selection-count {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.selection-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(224 49 49 / 12%);
+  color: #e03131;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.selection-delete:hover {
+  background: rgb(224 49 49 / 20%);
+}
+
+.selection-delete:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* ── Dev panel (Phase 3) ──────────────────────────────────────────────────── */
 
 .dev-panel {
