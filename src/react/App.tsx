@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { Engine } from '@engine/Engine';
 import { CanvasHost } from './CanvasHost';
 import { DevPanel } from './DevPanel';
+import { SelectionBar } from './SelectionBar';
 import { StatsOverlay } from './StatsOverlay';
 import { StylePanel } from './StylePanel';
 import { Toolbar } from './Toolbar';
@@ -26,19 +27,20 @@ export function App() {
           <ZoomControls engine={engine} />
           <StatsOverlay engine={engine} />
           <DevPanel engine={engine} />
+          <SelectionBar engine={engine} />
         </>
       )}
 
       <div className="badge">
-        <strong>Phase 3 — the performance lab.</strong>
+        <strong>Phase 4b — hit detection and selection.</strong>
         <br />
-        Load <em>50k</em> from the panel on the right, then zoom into a corner.{' '}
-        <em>draw</em> collapses to almost nothing while <em>cull</em> does not move —
-        because the cull examines every element that exists, not every element you
-        can see.
+        <kbd>V</kbd> for the selection tool · click a shape · <kbd>shift</kbd>-click to
+        add · drag on empty canvas for a rubber band · <kbd>⌘A</kbd> selects all ·{' '}
+        <kbd>⌫</kbd> deletes · <kbd>esc</kbd> deselects.
         <br />
-        That gap is the case for a quadtree, and Phase 4 is finished when{' '}
-        <em>tested</em> stops tracking <em>total</em>.
+        Load <em>50k</em> and click around: <em>hit broad/narrow</em> shows how many
+        candidates the index handed to the exact geometry test. It is usually under
+        ten, out of fifty thousand.
       </div>
     </div>
   );

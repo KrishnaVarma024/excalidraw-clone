@@ -553,6 +553,23 @@ function toLocal(p: Point, el: Element): Point {
 This is the trick worth remembering: **never write rotated-shape intersection maths. Rotate the
 point instead.** One 6-line function replaces a dozen special cases.
 
+> **Built in Phase 4b, with two deviations from the table above, both deliberate.**
+>
+> **Freehand is tested against its polyline, not its outline polygon.** The rendered outline does
+> not exist until perfect-freehand builds it, and building it on every `pointermove` is the most
+> expensive operation in the renderer run 240 times a second. Distance to the recorded polyline
+> with the tolerance widened by half the stroke width differs from the exact answer by less than
+> the stroke's own thickness, and errs toward being easier to click.
+>
+> **The ellipse outline distance is approximate.** `|d − 1| · min(rx, ry)` is exact for a circle
+> and generous for an eccentric ellipse. The exact answer needs a quartic solve or an iteration,
+> which is real work per pointer event, and being generous means an extra pixel of tolerance
+> rather than a shape you cannot click.
+>
+> Measured result at 50,000 elements: a click hands **3 candidates** to the narrow phase. The
+> linear scan it replaces costs 6.7 ms in a busy area and 13.3 ms over blank canvas — where it
+> cannot exit early — against ~4 ms of total event budget at 240 Hz.
+
 Note the consequence for the broad phase: an element's **quadtree bounds must be the AABB of the
 rotated shape**, which is larger than `{x, y, width, height}`. Compute it by rotating the four
 corners and taking min/max, then pad by `strokeWidth / 2 + roughnessJitter`.

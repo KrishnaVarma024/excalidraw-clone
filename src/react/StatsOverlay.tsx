@@ -58,6 +58,7 @@ export function StatsOverlay({ engine }: Props) {
   const tested = useRef<HTMLSpanElement>(null);
   const nodes = useRef<HTMLSpanElement>(null);
   const path = useRef<HTMLSpanElement>(null);
+  const hit = useRef<HTMLSpanElement>(null);
   const cache = useRef<HTMLSpanElement>(null);
   const grid = useRef<HTMLSpanElement>(null);
   const idle = useRef<HTMLSpanElement>(null);
@@ -94,6 +95,9 @@ export function StatsOverlay({ engine }: Props) {
       write(tested.current, info.render.tested.toLocaleString());
       write(nodes.current, info.render.nodes.toLocaleString());
       write(path.current, info.render.path);
+      // The broad/narrow ratio of the last click: how many candidates the index
+      // handed to the exact geometry test, and how many of those it had to run.
+      write(hit.current, `${info.hit.broad} / ${info.hit.narrow}`);
       write(cache.current, `${(info.render.cacheHitRate * 100).toFixed(0)}%`);
       write(grid.current, String(info.render.gridLines));
       write(idle.current, String(info.idleFrames));
@@ -121,6 +125,7 @@ export function StatsOverlay({ engine }: Props) {
       <Row label="tested" spanRef={tested} />
       <Row label="index nodes" spanRef={nodes} />
       <Row label="cull path" spanRef={path} />
+      <Row label="hit broad/narrow" spanRef={hit} />
       <Row label="cache hit" spanRef={cache} />
       <Row label="grid lines" spanRef={grid} />
       <Row label="idle frames" spanRef={idle} />
