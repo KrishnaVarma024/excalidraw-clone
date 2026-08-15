@@ -123,6 +123,8 @@ export class Engine {
     drawn: 0,
     total: 0,
     tested: 0,
+    nodes: 0,
+    path: 'all',
     cacheHitRate: 1,
   };
 

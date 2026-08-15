@@ -29,7 +29,8 @@
  */
 
 import type { Bounds } from '../util/geometry';
-import { boundsIntersect } from '../util/geometry';
+import { boundsArea, boundsContains, boundsIntersect, unionBounds } from '../util/geometry';
+import { QuadTree, type QuadTreeStats } from '../spatial/QuadTree';
 import { getRenderBounds } from './bounds';
 import type { Element, ElementId } from './element.types';
 
@@ -55,12 +56,49 @@ export type SceneListener = (change: SceneChange) => void;
  */
 export type ElementPatch = Partial<Omit<Element, 'id' | 'seed' | 'version' | 'type'>>;
 
+/** Which strategy `Scene.visible` chose. See the comment on that method. */
+export type QueryPath =
+  /** Everything was visible; the cached sorted array was returned untouched. */
+  | 'all'
+  /** Linear filter over the sorted array — chosen when most of the scene is on screen. */
+  | 'scan'
+  /** Quadtree range query — chosen when the viewport is a small window on a big scene. */
+  | 'index';
+
+/**
+ * View-area ÷ index-root-area at or above which `visible()` scans instead of
+ * querying.
+ *
+ * Not a guess. The two costs are `c₁·n` for the scan and `c₁·tested + c₂·k log k`
+ * for the query, so the crossover is wherever `k/n` makes the sort dominate.
+ * Measured on the bench at 50,000 elements, that is somewhere around a fifth of
+ * the scene on screen; 0.25 sits just past it, biased toward the scan because
+ * the scan's cost is flat and predictable while the query's degrades sharply
+ * once `k` is large.
+ *
+ * Exported so `tests/engine/culling.test.ts` can assert against the real number
+ * rather than restating it and drifting.
+ */
+export const SCAN_AREA_RATIO = 0.25;
+
+const EMPTY: readonly Element[] = [];
+
 /** Work performed by a spatial query. See `Scene.queryStats`. */
 export interface QueryStats {
-  /** Elements examined. Under a linear scan this equals the live element count. */
+  /** Elements examined. Under a linear scan this equalled the live element count. */
   readonly tested: number;
   /** Elements returned. `returned / tested` is the selectivity of the query. */
   readonly returned: number;
+  /** Quadtree nodes descended into. Zero unless the `index` path ran. */
+  readonly nodes: number;
+  /**
+   * Which strategy ran.
+   *
+   * Reported rather than inferred, because "the cull got slower" and "the cull
+   * took a different path" look identical in a timing and have completely
+   * different fixes. Phase 3's lesson, applied one phase later.
+   */
+  readonly path: QueryPath;
 }
 
 export class Scene {
@@ -69,9 +107,54 @@ export class Scene {
 
   /** Lazily rebuilt z-sorted view of non-deleted elements. */
   private sortedCache: Element[] | null = null;
+
+  /**
+   * Where each element sits in `sortedCache`. Built with it, discarded with it.
+   *
+   * This exists because of a bug Phase 4 exposed that had been latent since
+   * Phase 2. `mutate` replaces the element object rather than editing it — that
+   * is what makes undo cheap — so after a move, `sortedCache` holds a reference
+   * to the *old* object. Nothing noticed, because until now there was exactly
+   * one way to read the scene and it was consistently stale.
+   *
+   * Phase 4 added a second path: the index returns ids, which are looked up
+   * fresh in `elements`. Suddenly two readers disagreed about where a shape was,
+   * and the brute-force oracle in `culling.test.ts` caught it immediately.
+   *
+   * Rebuilding the sort on every mutation would fix it at O(n log n) per frame
+   * of a drag, which is the cost this phase exists to remove. Patching one slot
+   * is O(1), which is why the position map is worth its memory.
+   */
+  private sortedIndex: Map<ElementId, number> | null = null;
   private maxZ = 0;
 
-  private lastQuery: QueryStats = { tested: 0, returned: 0 };
+  /**
+   * The spatial index.
+   *
+   * **A derived cache, never the source of truth.** `elements` is. If the two
+   * ever disagree the map wins, and the bug is in whoever forgot to call
+   * `index.update`. That is why every write in this class funnels through
+   * `add` / `mutate` / `load` / `clear` and nothing else can touch an element.
+   *
+   * It holds only live elements — soft-deleted ones are removed on delete and
+   * re-inserted on undelete, so a query never has to filter.
+   */
+  private readonly index = new QuadTree();
+
+  /**
+   * Union of the render bounds of every element ever inserted. **Grow-only.**
+   *
+   * Used to pick a strategy in `visible()`. The exact union would have to shrink
+   * when an element moves inward, and recomputing it is O(n) — on every frame of
+   * a drag, which is the workload this phase exists to make cheap. Growing
+   * monotonically costs one `unionBounds` per write and is wrong only in the
+   * safe direction: a box that is too big makes `visible()` *miss* a shortcut,
+   * never take one it shouldn't. `load()` recomputes it exactly, so opening a
+   * file resets the drift.
+   */
+  private contentBounds: Bounds | null = null;
+
+  private lastQuery: QueryStats = { tested: 0, returned: 0, nodes: 0, path: 'all' };
 
   /* ── reading ────────────────────────────────────────────────────────────── */
 
@@ -94,31 +177,113 @@ export class Scene {
       this.sortedCache = [...this.elements.values()]
         .filter((el) => !el.isDeleted)
         .sort((a, b) => a.zIndex - b.zIndex);
+      this.sortedIndex = new Map();
+      for (let i = 0; i < this.sortedCache.length; i++) {
+        this.sortedIndex.set(this.sortedCache[i]!.id, i);
+      }
     }
     return this.sortedCache;
+  }
+
+  /** Drop the z-order cache. Called when membership or ordering changes. */
+  private invalidateSorted(): void {
+    this.sortedCache = null;
+    this.sortedIndex = null;
   }
 
   /**
    * Live elements whose render bounds intersect `view`, in z-order.
    *
-   * This is **viewport culling**, and it is the reason frame cost tracks what is
-   * on screen rather than what exists. Drawing 50,000 elements when 40 are
-   * visible is the difference between 800 ms and 2 ms.
+   * ── Three paths, and two of them exist because a benchmark said so ─────────
    *
-   * It is O(n) — a bounds test per element, every frame. That is fine at a few
-   * thousand and is exactly the cost Phase 4's quadtree replaces with an
-   * O(log n) range query. Phase 3 measures the crossover rather than guessing
-   * it.
+   * The naive version of this method is one line — ask the quadtree, sort the
+   * answer. It is also a **2.8× regression** at 50,000 elements zoomed out, and
+   * the only reason that is written here rather than shipped is that
+   * `tests/bench/culling.bench.ts` has measured the zoomed-out case since Phase
+   * 3, before any of this existed, precisely so it could not hide.
+   *
+   * The cost model that explains it:
+   *
+   *     linear scan   c₁·n                     ordering is free — the array is
+   *                                            already sorted and stays sorted
+   *     index query   c₁·tested + c₂·k·log k   ordering is NOT free — the tree
+   *                                            returns tree order, not z-order
+   *
+   * When `k` (what is on screen) is a small fraction of `n`, the query wins by
+   * two orders of magnitude. When `k` approaches `n`, `k log k` is strictly
+   * worse than the `n` it replaced — at 50,000 elements the sort alone is
+   * ~18 ms, which is a whole frame. **The quadtree is not faster. It is faster
+   * for one shape of query**, and shipping it unconditionally trades a win you
+   * measured for a loss you didn't.
+   *
+   * So the path is chosen per call:
+   *
+   *   `all`   — the view contains the index's root rectangle, so everything is
+   *             visible by construction. Return the cached sorted array: no
+   *             bounds tests, no tree walk, no sort. `tested` is honestly 0.
+   *   `scan`  — the view covers a large fraction of the indexed area, so `k` will
+   *             be close to `n`. Filter the sorted array: O(n) and z-ordered for
+   *             free. This is Phase 3's code, kept deliberately.
+   *   `index` — otherwise. Query, map, sort.
+   *
+   * ── Why the ratio is measured against the index root, not the content ──────
+   *
+   * The honest proxy for `k/n` is view-area over *content*-area. Maintaining
+   * exact content bounds means a union that has to shrink when an element moves
+   * inward, which is O(n) to recompute — and it would be recomputed on every
+   * frame of a drag, which is precisely the workload this phase exists to make
+   * cheap. Root bounds are already maintained, only ever grow, and are never
+   * smaller than the content. Using them can only cause the `scan` path to be
+   * *missed*, never wrongly taken, and the failure mode costs one sort rather
+   * than a wrong answer.
    */
   visible(view: Bounds): readonly Element[] {
-    const all = this.sorted();
-    const out: Element[] = [];
-    for (const el of all) {
-      if (boundsIntersect(getRenderBounds(el), view)) out.push(el);
+    const content = this.contentBounds;
+    if (content === null) {
+      this.lastQuery = { tested: 0, returned: 0, nodes: 0, path: 'all' };
+      return EMPTY;
     }
 
-    this.lastQuery = { tested: all.length, returned: out.length };
+    if (boundsContains(view, content)) {
+      const all = this.sorted();
+      this.lastQuery = { tested: 0, returned: all.length, nodes: 0, path: 'all' };
+      return all;
+    }
+
+    if (boundsArea(view) >= boundsArea(content) * SCAN_AREA_RATIO) {
+      const all = this.sorted();
+      const out: Element[] = [];
+      for (const el of all) {
+        if (boundsIntersect(getRenderBounds(el), view)) out.push(el);
+      }
+      this.lastQuery = { tested: all.length, returned: out.length, nodes: 0, path: 'scan' };
+      return out;
+    }
+
+    const entries = this.index.query(view);
+    const out: Element[] = [];
+    for (const entry of entries) {
+      const el = this.elements.get(entry.id);
+      // `undefined` would mean the index has drifted from the map. It cannot
+      // happen through this class's API, and skipping is the right response if
+      // it somehow does: draw slightly less rather than crash the render loop.
+      if (el !== undefined) out.push(el);
+    }
+    out.sort((a, b) => a.zIndex - b.zIndex);
+
+    const work = this.index.lastQueryWork;
+    this.lastQuery = {
+      tested: work.tested,
+      returned: out.length,
+      nodes: work.nodes,
+      path: 'index',
+    };
     return out;
+  }
+
+  /** Index diagnostics. Used by the dev panel and by the structural tests. */
+  indexStats(): QuadTreeStats {
+    return this.index.stats();
   }
 
   /**
@@ -133,10 +298,12 @@ export class Scene {
    * examined* proves the complexity class directly and gives the same answer on
    * every machine.
    *
-   * Right now `tested` equals the live element count on every frame, which is
-   * the definition of a linear scan. Phase 4's quadtree makes it grow
-   * logarithmically, and the very same assertion goes from documenting the
-   * problem to proving the fix.
+   * Through Phase 3 `tested` equalled the live element count on every frame —
+   * the definition of a linear scan, and the deficiency the assertion in
+   * `tests/engine/culling.test.ts` was written to document. Phase 4's quadtree
+   * makes it grow with what is on screen instead of with what exists, and the
+   * very same assertion went from documenting the problem to proving the fix.
+   * Reading that one line's diff is the shortest possible summary of this phase.
    */
   get queryStats(): Readonly<QueryStats> {
     return this.lastQuery;
@@ -153,10 +320,15 @@ export class Scene {
     if (this.elements.has(element.id)) {
       throw new Error(`Scene already contains an element with id ${element.id}`);
     }
+    const bounds = getRenderBounds(element);
     this.elements.set(element.id, element);
     this.maxZ = Math.max(this.maxZ, element.zIndex);
-    this.sortedCache = null;
-    this.emit({ id: element.id, before: null, after: getRenderBounds(element) });
+    this.invalidateSorted();
+    if (!element.isDeleted) {
+      this.index.insert(element.id, bounds);
+      this.growContentBounds(bounds);
+    }
+    this.emit({ id: element.id, before: null, after: bounds });
   }
 
   /**
@@ -195,14 +367,45 @@ export class Scene {
     const beforeBounds = getRenderBounds(current);
     const updated = { ...current, ...patch, version: current.version + 1 } as Element;
 
+    const afterBounds = getRenderBounds(updated);
+
     this.elements.set(id, updated);
+    /* Ordering or membership changed → the cached array is structurally wrong,
+       so throw it away. Otherwise only the *contents* of one slot are stale, and
+       replacing that one reference is O(1). Getting this wrong in the cheap
+       direction (never invalidating) is the bug described on `sortedIndex`;
+       getting it wrong in the expensive direction (always invalidating) re-sorts
+       the whole scene on every frame of a drag. */
     if (patch.zIndex !== undefined) {
       this.maxZ = Math.max(this.maxZ, updated.zIndex);
-      this.sortedCache = null;
+      this.invalidateSorted();
+    } else if (patch.isDeleted !== undefined) {
+      this.invalidateSorted();
+    } else if (this.sortedCache !== null && this.sortedIndex !== null) {
+      const slot = this.sortedIndex.get(id);
+      if (slot === undefined) this.invalidateSorted();
+      else this.sortedCache[slot] = updated;
     }
-    if (patch.isDeleted !== undefined) this.sortedCache = null;
 
-    this.emit({ id, before: beforeBounds, after: updated.isDeleted ? null : getRenderBounds(updated) });
+    /* ── Keep the index in sync ────────────────────────────────────────────
+       Four cases, and the reason this lives *here* rather than in a listener is
+       that a listener runs after the mutation is already visible — a query
+       between the two would read a stale index. Ordering matters more than it
+       looks.
+
+       `beforeBounds` was captured before the patch was applied. That is the
+       entire contract `QuadTree.remove` depends on: remove retraces the path
+       the entry took on the way in, so it must be handed the rectangle the
+       entry was inserted with. Compute it after, and the entry is orphaned. */
+    const wasLive = !current.isDeleted;
+    const isLive = !updated.isDeleted;
+
+    if (wasLive && isLive) this.index.update(id, beforeBounds, afterBounds);
+    else if (wasLive) this.index.remove(id, beforeBounds); // deleted
+    else if (isLive) this.index.insert(id, afterBounds); // undeleted
+    if (isLive) this.growContentBounds(afterBounds);
+
+    this.emit({ id, before: beforeBounds, after: isLive ? afterBounds : null });
     return true;
   }
 
@@ -232,19 +435,28 @@ export class Scene {
         dropped++;
       }
     }
-    if (dropped > 0) this.sortedCache = null;
+    if (dropped > 0) this.invalidateSorted();
+    // Nothing to do to the index: soft-deleted elements were removed from it at
+    // the moment they were deleted, so compaction only touches the map.
     return dropped;
   }
 
   /** Replace the entire scene. Used by load (Phase 8) and tests. */
   load(elements: readonly Element[]): void {
     this.elements.clear();
+    this.index.clear();
+    this.contentBounds = null; // recomputed exactly below — the one place drift resets
     this.maxZ = 0;
     for (const el of elements) {
       this.elements.set(el.id, el);
       this.maxZ = Math.max(this.maxZ, el.zIndex);
+      if (!el.isDeleted) {
+        const b = getRenderBounds(el);
+        this.index.insert(el.id, b);
+        this.growContentBounds(b);
+      }
     }
-    this.sortedCache = null;
+    this.invalidateSorted();
     this.emit({ id: '', before: null, after: null });
   }
 
@@ -253,6 +465,10 @@ export class Scene {
   subscribe(listener: SceneListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private growContentBounds(b: Bounds): void {
+    this.contentBounds = this.contentBounds === null ? b : unionBounds(this.contentBounds, b);
   }
 
   private emit(change: SceneChange): void {

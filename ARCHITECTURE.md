@@ -434,6 +434,30 @@ That last clause is the crux, and the trade-off is a great interview answer:
 `maxDepth = 8` bounds the tree at 4⁸ = 65,536 leaves and — critically — stops infinite recursion
 when 100 elements share the exact same coordinates (which `capacity` alone can never resolve).
 
+#### 5.2.1 What the straddler rule actually cost — measured in Phase 4a
+
+The pathology above is not hypothetical, and it is not mainly about *large* elements.
+
+Subdivision stops paying once a node is only a few times an element's size: below that, most
+elements straddle whichever line you cut with, so they stay in the parent and the node stops
+thinning. The result at 50,000 elements is that a pinhole query descends into **31 nodes** — the
+tree working perfectly — but those 31 nodes hold about 80 entries each, against a capacity of 8.
+
+So `tested` fell from 100% of the scene to ~5%, and then stayed at ~5% as the scene grew:
+
+| Elements | tested | % of scene | nodes descended into |
+|---:|---:|---:|---:|
+| 500 | 36 | 7.2% | 17 |
+| 2,000 | 123 | 6.2% | 21 |
+| 10,000 | 568 | 5.7% | 26 |
+| 50,000 | 2,497 | 5.0% | 31 |
+
+**That is a ~16× smaller constant, not a better complexity class.** Raising `maxDepth` from 8 to 14
+changes it by under 1% — measured, because "increase the depth limit" is the obvious guess and it is
+wrong. The remedy is the loose quadtree in the table above. It is not implemented, because what
+remains is 0.3 ms of a 16.67 ms frame, and the counters to revisit the decision are already in the
+code.
+
 ### 5.3 An infinite canvas has no bounds. A quadtree needs bounds.
 
 This is the genuinely interesting problem, and the part most tutorials never mention.
@@ -481,6 +505,13 @@ on `pointerdown`, keep it in a plain array (it's small, O(k) is fine), and re-in
 `pointerup`. Real editors do this.
 
 ### 5.5 Hit detection is two phases
+
+> **Note added in Phase 4a.** The render cull does *not* use the index unconditionally — see
+> `Scene.visible`, which chooses per query between returning the cached sorted array, a linear
+> scan, and an index query. The tree returns entries in tree order, so re-sorting them into z-order
+> costs O(k log k), and at 50,000 elements with everything on screen that sort alone is ~18 ms.
+> Hit detection below has no such problem: it wants the topmost hit, `k` is 1–5, and there is
+> nothing to sort.
 
 **Broad phase** — quadtree, AABB only, cheap, over-inclusive:
 
