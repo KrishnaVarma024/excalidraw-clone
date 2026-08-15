@@ -10,10 +10,11 @@
  * That is the difference between frame cost tracking *what exists* and tracking
  * *what you can see*.
  *
- * The cull is O(n): a bounds test per element, every frame. Fine at a few
- * thousand, and exactly the cost Phase 4's quadtree replaces with an O(log n)
- * range query. Phase 3 measures where the crossover actually is rather than
- * guessing.
+ * Phase 4 replaced the O(n) cull with a quadtree range query — and, because the
+ * index is not unconditionally better, with a choice between three strategies
+ * made per frame. The renderer does not know or care which one ran; it asks
+ * `Scene.visible` for what is on screen and reports the answer's cost. See
+ * `Scene.visible` for the cost model, and `RenderStats.path` for what it chose.
  *
  * ── The structural rule, unchanged ──────────────────────────────────────────
  *
@@ -23,7 +24,7 @@
  */
 
 import type { Viewport } from '../viewport/Viewport';
-import type { Scene } from '../scene/Scene';
+import type { QueryPath, Scene } from '../scene/Scene';
 import { type GridStyle, drawGrid } from './grid';
 import { createRoughCanvas, drawElement } from './drawElement';
 import { RoughCache } from './roughCache';
@@ -45,6 +46,15 @@ export interface RenderStats {
    * is deterministic — unlike a timing, it reads the same on every machine.
    */
   tested: number;
+  /** Quadtree nodes descended into. Near-constant as the scene grows. */
+  nodes: number;
+  /**
+   * Which of `Scene.visible`'s three strategies ran.
+   *
+   * On screen because "the cull got slower" and "the cull took a different
+   * path" look identical in a timing and have completely different fixes.
+   */
+  path: QueryPath;
   /** Rough.js drawable cache hit rate, 0…1. Sits at ~1 once warm. */
   cacheHitRate: number;
 }
@@ -148,6 +158,8 @@ export class Renderer {
       drawn: visible.length,
       total: this.scene.visibleCount,
       tested: this.scene.queryStats.tested,
+      nodes: this.scene.queryStats.nodes,
+      path: this.scene.queryStats.path,
       cacheHitRate: lookups === 0 ? 1 : hits / lookups,
     };
   }

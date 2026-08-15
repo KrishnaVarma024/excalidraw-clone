@@ -40,10 +40,14 @@ interface Props {
  * while `cull` does not move at all. That divergence is the entire argument for
  * Phase 4's quadtree, and you cannot see it from one number.
  *
- * `tested` is the same argument without a clock attached: it is the count of
- * elements the cull examined. It is deterministic, it reads identically on a
- * fast laptop and a throttled CI box, and Phase 4 is done when it stops tracking
- * `total`.
+ * `tested` is the same argument without a clock attached: the count of elements
+ * the cull examined. It is deterministic and reads identically on a fast laptop
+ * and a throttled CI box.
+ *
+ * Phase 4 added `index nodes` and `cull path` beside it. Load 50k and watch all
+ * three as you zoom: `tested` collapses, `index nodes` barely moves, and `cull
+ * path` flips between `all`, `scan` and `index` as the viewport changes what the
+ * cheapest strategy is. Those three rows together are the whole phase.
  */
 export function StatsOverlay({ engine }: Props) {
   const fps = useRef<HTMLSpanElement>(null);
@@ -52,6 +56,8 @@ export function StatsOverlay({ engine }: Props) {
   const zoom = useRef<HTMLSpanElement>(null);
   const drawn = useRef<HTMLSpanElement>(null);
   const tested = useRef<HTMLSpanElement>(null);
+  const nodes = useRef<HTMLSpanElement>(null);
+  const path = useRef<HTMLSpanElement>(null);
   const cache = useRef<HTMLSpanElement>(null);
   const grid = useRef<HTMLSpanElement>(null);
   const idle = useRef<HTMLSpanElement>(null);
@@ -86,6 +92,8 @@ export function StatsOverlay({ engine }: Props) {
       // tested is what the cull cost you. Equal to total under a linear scan;
       // Phase 4 is finished when this stops growing with the scene.
       write(tested.current, info.render.tested.toLocaleString());
+      write(nodes.current, info.render.nodes.toLocaleString());
+      write(path.current, info.render.path);
       write(cache.current, `${(info.render.cacheHitRate * 100).toFixed(0)}%`);
       write(grid.current, String(info.render.gridLines));
       write(idle.current, String(info.idleFrames));
@@ -111,6 +119,8 @@ export function StatsOverlay({ engine }: Props) {
       <div className="stats-section">scene</div>
       <Row label="drawn/total" spanRef={drawn} />
       <Row label="tested" spanRef={tested} />
+      <Row label="index nodes" spanRef={nodes} />
+      <Row label="cull path" spanRef={path} />
       <Row label="cache hit" spanRef={cache} />
       <Row label="grid lines" spanRef={grid} />
       <Row label="idle frames" spanRef={idle} />

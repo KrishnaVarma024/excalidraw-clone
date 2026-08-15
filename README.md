@@ -21,12 +21,13 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 3 of 11 — the performance lab.** The app can now make itself slow on demand and say
-precisely where the time went. There is a seeded scene generator (100 / 1k / 10k / 50k), a
-per-stage frame breakdown, and a benchmark suite.
+**Phase 4a of 11 — the spatial index.** The O(n) viewport cull is now a re-rooting quadtree,
+plus a choice between three strategies made per query — because the index is not unconditionally
+better, and shipping it everywhere was a measured 2.8× regression.
 
-Nothing got faster in this phase. That's the point: the next two phases are optimisations, and
-an optimisation with no *before* number is a story rather than a result.
+At 50,000 elements, one scene, one frame: framing the whole drawing costs **45.6 ms** in the cull;
+zooming into a corner costs **0.30 ms**. Same data, 152× apart, decided by which strategy the
+viewport makes cheapest.
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -36,7 +37,8 @@ an optimisation with no *before* number is a story rather than a result.
 | 1 | Viewport: pan, zoom, DPR-correct rendering | ✅ |
 | 2 | Element model, shape and freehand tools | ✅ |
 | 3 | Performance instrumentation and baseline | ✅ |
-| 4 | Quadtree spatial index, hit detection, selection | — |
+| 4a | Quadtree spatial index | ✅ |
+| 4b | Hit detection and selection | — |
 | 5 | Dirty-rectangle renderer | — |
 | 6 | Move, resize, rotate, multi-select | — |
 | 7 | Text | — |
@@ -46,42 +48,54 @@ an optimisation with no *before* number is a story rather than a result.
 
 Each phase is a pull request with the design reasoning in its description.
 
-### The baseline, in one table
+### What the index actually bought
 
-The cull — the loop that decides which elements are on screen — is a linear scan today. From
-`npm run bench` on a MacBook Pro, Node 22:
+Phase 3's cull was a linear scan whose cost was **unrelated to the viewport** — culling 50,000
+elements took the same time whether forty were on screen or all of them. That, not the growth
+curve, was the defect.
 
-| Elements | Cull, mean | Relative | ms **per element** | Examined per frame |
-|---:|---:|---:|---:|---:|
-| 100 | 0.010 ms | 1× | 0.000099 | 100 |
-| 1,000 | 0.095 ms | 9.6× | 0.000095 | 1,000 |
-| 10,000 | 0.98 ms | 99× | 0.000098 | 10,000 |
-| 50,000 | 5.09 ms | **513×** | 0.000102 | 50,000 |
+One fixed scene, one pinhole viewport, counted rather than timed — so these numbers are identical
+on every machine and are what [`tests/engine/culling.test.ts`](tests/engine/culling.test.ts)
+asserts:
 
-**≈100 nanoseconds per element, per frame — flat across a 500× range.** That fourth column is what
-O(n) actually looks like when you measure it rather than assert it: a constant cost per item,
-holding to within 7% over two and a half orders of magnitude.
+| Elements | Examined per frame, before | after | Nodes descended into |
+|---:|---:|---:|---:|
+| 500 | 500 | 36 | 17 |
+| 2,000 | 2,000 | 123 | 21 |
+| 10,000 | 10,000 | 568 | 26 |
+| 50,000 | 50,000 | **2,497** | **31** |
 
-At 50,000 elements the worst 1% of frames spend **15.7 ms** in the cull alone — 94% of a 60 fps
-budget, before a single pixel is rasterised.
+Two honest readings of that table.
 
-**But the growth curve isn't the real finding.** Here is the same 50,000-element scene culled at
-three different zoom levels:
+**The node count is near-constant.** 100× the elements for 1.8× the nodes descended into. That is
+the tree doing exactly what a tree is for.
 
-| Viewport | Elements visible | Cull, mean |
-|---|---:|---:|
-| zoomed in | a few dozen | 4.56 ms |
-| typical | a few hundred | 5.09 ms |
-| zoomed out | all 50,000 | 4.78 ms |
+**The examined count is not logarithmic.** It fell to ~6% of the scene and then *stayed* at ~6% as
+the scene grew — a ~16× smaller constant, not a better complexity class. Elements stop separating
+once a node is only a few times their size, so subdivision stops thinning the nodes. Raising the
+depth limit from 8 to 14 changes it by under 1%; that was measured, not assumed. The remedy is a
+loose quadtree, and it is not implemented because what remains is 0.3 ms of a 16.67 ms frame.
 
-Those are the same number. Culling 50,000 elements costs the same whether you can see forty of them
-or all of them — **the work is entirely unrelated to what you are looking at.** A structure that
-answers *"what is inside this rectangle?"* by examining objects nowhere near the rectangle is doing
-the wrong thing, however fast it does it. That is the defect Phase 4 fixes.
+There is also a result that has nothing to do with the tree. Roughly **90% of the old cull was
+recomputing bounds, not testing them** — `getRenderBounds` walks the point list for freehand
+strokes and rotates four corners for anything with an angle, once per element per frame. The index
+stores the rectangle at insert time. A one-line cache would have delivered much of the same win,
+and saying so is more useful than letting the data structure take the credit.
 
-And it is asserted, not eyeballed: [`tests/engine/culling.test.ts`](tests/engine/culling.test.ts)
-fails the build if the examined-count ever stops matching the element count — which is precisely
-what the quadtree is supposed to make happen.
+### Not one strategy — three
+
+```
+scan    c₁·n                     ordering is free — the array is already sorted
+index   c₁·tested + c₂·k·log k   ordering is NOT free — the tree returns tree order
+```
+
+At 50,000 elements with everything on screen, that sort alone is ~18 ms. So `Scene.visible` picks
+per call: return the cached sorted array when the view contains everything, scan when most of the
+scene is visible, query the index otherwise. `cull path` in the stats overlay reports which one ran.
+
+The benchmark that forced this was written in Phase 3, before the quadtree existed, with the
+comment *"benchmarking only the flattering case is how people ship an optimisation that is a
+pessimisation in the common path."* It then caught exactly that.
 
 ### Measured so far
 
@@ -91,10 +105,11 @@ what the quadtree is supposed to make happen.
 | Frames skipped while idle | **~59/sec** — the loop does no work at all when nothing changed |
 | React renders during a pan or draw gesture | **0** |
 | Rough.js drawable cache hit rate, warm | **100%** |
-| Culling ratio at 10k, zoomed in | **403 drawn / 10,001 tested** |
-| Cull cost per element | **~100 ns**, constant from 100 to 50,000 elements |
-| Cull growth, 100 → 50,000 elements | **513×** — linear, as designed, for now |
-| Cull cost at 50k, zoomed in vs out | **4.56 ms vs 4.78 ms** — the viewport doesn't matter yet |
+| Cull at 50k, framed vs zoomed in | **45.6 ms → 0.30 ms** — same scene, 152× |
+| Elements examined at 50k, zoomed in | **2,497 of 50,000** (was 50,000) |
+| Index nodes descended into at 50k | **31** — 1.8× the count at 500 elements |
+| Cull at 50k with everything on screen | **O(1)** — containment proved once, cached array returned |
+| Share of the old cull that was bounds recomputation | **~90%** (17.7 ms vs 1.8 ms per 50k) |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -156,9 +171,10 @@ src/
     tools/         the drawing state machine
     input/         pointer, wheel and keyboard → tool or viewport
     dev/           the seeded scene generator — load-bearing for Phases 4 and 5
+    spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      231 tests, all in Node. ~5s, no jsdom.
+tests/engine/      260 tests, all in Node. ~5s, no jsdom.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 

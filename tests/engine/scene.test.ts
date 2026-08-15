@@ -71,6 +71,59 @@ describe('Scene', () => {
     });
   });
 
+  describe('the sorted cache', () => {
+    /**
+     * A regression test for a bug that was latent from Phase 2 until Phase 4
+     * made it observable.
+     *
+     * `mutate` replaces the element object rather than editing it — structural
+     * sharing is what makes undo cheap — so anything holding a reference to the
+     * old object is holding a stale copy. `sortedCache` held exactly that, and
+     * was only invalidated when z-order or deletion changed.
+     *
+     * Nothing noticed for two phases, because there was one way to read the
+     * scene and it was consistently stale. Phase 4's spatial index looks
+     * elements up fresh by id, so two readers began to disagree about where a
+     * shape was — and the brute-force oracle in `culling.test.ts` failed within
+     * seconds of the index being wired in.
+     *
+     * The lesson worth keeping: **a cache that is never read against a second
+     * source can be wrong indefinitely without anybody finding out.** The test
+     * that found this was not a test of caching.
+     */
+    it('reflects a plain geometry change without a resort', () => {
+      const el = rect(0, 0);
+      scene.add(el);
+      scene.sorted(); // warm the cache
+
+      scene.mutate(el.id, { x: 500 });
+
+      expect(scene.sorted()[0]!.x).toBe(500);
+      expect(scene.sorted()[0]).toBe(scene.get(el.id));
+    });
+
+    it('keeps every entry fresh after many moves', () => {
+      const els = [rect(0, 0, 10, 10, 1), rect(50, 0, 10, 10, 2), rect(100, 0, 10, 10, 3)];
+      for (const e of els) scene.add(e);
+      scene.sorted();
+
+      for (const e of els) scene.mutate(e.id, { y: e.y + 999 });
+
+      for (const e of scene.sorted()) expect(e.y).toBe(999);
+    });
+
+    it('still resorts when z-order actually changes', () => {
+      const a = rect(0, 0, 10, 10, 1);
+      const b = rect(0, 0, 10, 10, 2);
+      scene.add(a);
+      scene.add(b);
+      expect(scene.sorted().map((e) => e.id)).toEqual([a.id, b.id]);
+
+      scene.mutate(a.id, { zIndex: 99 });
+      expect(scene.sorted().map((e) => e.id)).toEqual([b.id, a.id]);
+    });
+  });
+
   describe('soft delete', () => {
     it('hides the element without losing it', () => {
       const el = rect(0, 0);
