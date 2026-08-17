@@ -32,15 +32,15 @@ export function App() {
       )}
 
       <div className="badge">
-        <strong>Phase 4b — hit detection and selection.</strong>
+        <strong>Phase 5 — dirty-rectangle rendering.</strong>
         <br />
-        <kbd>V</kbd> for the selection tool · click a shape · <kbd>shift</kbd>-click to
-        add · drag on empty canvas for a rubber band · <kbd>⌘A</kbd> selects all ·{' '}
-        <kbd>⌫</kbd> deletes · <kbd>esc</kbd> deselects.
+        The screen is already correct; only what changed gets repaired. Load{' '}
+        <em>50k</em>, then draw one shape and watch <em>coverage</em> — the fraction
+        of the screen actually repainted. It should be a fraction of a percent.
         <br />
-        Load <em>50k</em> and click around: <em>hit broad/narrow</em> shows how many
-        candidates the index handed to the exact geometry test. It is usually under
-        ten, out of fifty thousand.
+        Now pan. <em>full repaints</em> climbs, and its reason says{' '}
+        <em>global</em>: every pixel moved, so there is nothing for dirty rectangles
+        to save. Knowing when to give up is the whole trick.
       </div>
     </div>
   );

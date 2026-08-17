@@ -21,13 +21,21 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 4b of 11 — hit detection and selection.** Click, shift-click, rubber-band, select-all,
-delete. Built on the Phase 4a index, which is what makes it possible at all.
+**Phase 5 of 11 — dirty-rectangle rendering.** The last of the three headline techniques. The
+render loop is inverted: the screen is already correct, so only what changed gets repaired.
 
-Hit testing runs on every `pointermove` — 120–240 Hz on a trackpad — not once per frame. At 50,000
-elements a linear scan over blank canvas takes **13.3 ms per event**; at 240 Hz that is 3× more
-work than there is time, which is not a slow app but a frozen pointer. Through the index it is
-**0.0002 ms**, and flat from 100 elements to 50,000.
+Measured on the workload that isolates the static layer — 50,000 elements, then twenty
+select-and-delete operations, one line changed to force a full repaint for the comparison:
+
+| | full repaint | dirty rects | |
+|---|---:|---:|---:|
+| frame p50 | 14.70 ms | 12.10 ms | 1.2× |
+| frame **p95** | 1074.80 ms | **82.20 ms** | **13×** |
+| screen repainted | 100% | **0.8%** | |
+| wall clock, 20 deletions | 21.4 s | **3.3 s** | 6.5× |
+
+p50 moved 1.2× and p95 moved 13×. Jank lives in the tail, which is why the overlay has reported
+p50 *and* p95 since Phase 1 — a mean would have called this change not worth making.
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -39,7 +47,7 @@ work than there is time, which is not a slow app but a frozen pointer. Through t
 | 3 | Performance instrumentation and baseline | ✅ |
 | 4a | Quadtree spatial index | ✅ |
 | 4b | Hit detection and selection | ✅ |
-| 5 | Dirty-rectangle renderer | — |
+| 5 | Dirty-rectangle renderer | ✅ |
 | 6 | Move, resize, rotate, multi-select | — |
 | 7 | Text | — |
 | 8 | Undo/redo, persistence | — |
@@ -130,6 +138,9 @@ pessimisation in the common path."* It then caught exactly that.
 | Hit test at 50k, busy area | **6.73 ms → 0.061 ms** (111×) |
 | Hit test at 50k, empty canvas | **13.28 ms → 0.0002 ms**, and flat in scene size |
 | Broad-phase candidates per click at 50k | **3** |
+| Screen repainted when one shape changes at 50k | **0.8%** |
+| Frame p95 across 20 deletions at 50k | **1074.8 ms → 82.2 ms** (13×) |
+| Full repaints across that workload | **43 → 3** |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -194,7 +205,7 @@ src/
     spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      309 tests, all in Node. ~7s, no jsdom.
+tests/engine/      337 tests, all in Node. ~9s, no jsdom.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 
