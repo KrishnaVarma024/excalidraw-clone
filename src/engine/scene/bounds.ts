@@ -99,9 +99,45 @@ export function getRenderPadding(el: Element): number {
   return stroke + jitter + freehand + 1;
 }
 
-/** The rectangle of pixels this element can touch. Phase 5's dirty rect. */
+/**
+ * The rectangle of pixels this element can touch. The dirty rect.
+ *
+ * ── Memoised, and this is the highest-leverage line in the renderer ─────────
+ *
+ * Phase 4a set out to explain a 264× speedup and found the arithmetic did not
+ * work: 16× fewer elements examined cannot make a cull 264× faster. Measuring
+ * the inner loop instead of assuming it:
+ *
+ *     50,000 × getRenderBounds + intersect     17.7 ms
+ *     50,000 × intersect only (precomputed)     1.8 ms
+ *
+ * **About 90% of that cull was this function, not the comparison.** It rotates
+ * four corners for anything with an angle and, for freehand, has already walked
+ * a point list to get there. Phase 4a's index hid the cost by storing bounds at
+ * insert time; the `scan` path and the dirty-rect pipeline still pay it, over
+ * and over, for elements that have not changed.
+ *
+ * ── Why a WeakMap keyed on the element object ──────────────────────────────
+ *
+ * `Scene.mutate` never edits an element in place — it replaces the object and
+ * bumps `version`. So object identity *is* the cache key, and it is a perfect
+ * one: a changed element is a different object and misses the cache
+ * automatically. No `id:version` string to build, no invalidation to forget, and
+ * a `WeakMap` lets a dropped element take its entry with it rather than leaking.
+ *
+ * This is the same invariant `roughCache` relies on, spent a second time. It is
+ * worth noticing how much a single enforced rule — *one mutator, always a new
+ * object* — has paid for by now.
+ */
+const renderBoundsCache = new WeakMap<Element, Bounds>();
+
 export function getRenderBounds(el: Element): Bounds {
-  return expandBounds(getRotatedBounds(el), getRenderPadding(el));
+  const cached = renderBoundsCache.get(el);
+  if (cached !== undefined) return cached;
+
+  const bounds = expandBounds(getRotatedBounds(el), getRenderPadding(el));
+  renderBoundsCache.set(el, bounds);
+  return bounds;
 }
 
 /**

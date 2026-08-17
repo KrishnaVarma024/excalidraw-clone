@@ -40,6 +40,7 @@
 
 import { DARK_THEME, LIGHT_THEME, Renderer, type RenderStats, type Theme } from './render/Renderer';
 import { InteractiveRenderer, type SelectionOverlay } from './render/InteractiveRenderer';
+import { DirtyTracker, type DirtyStats } from './render/DirtyTracker';
 import { InputRouter, type InputDelegate, type PointerInfo } from './input/InputRouter';
 import { Viewport } from './viewport/Viewport';
 import { Scene, type HitStats } from './scene/Scene';
@@ -90,6 +91,8 @@ export interface FrameInfo {
    * phase rather than a footnote.
    */
   readonly stages: StageTimings;
+  /** What the dirty-rectangle tracker decided this frame. */
+  readonly dirty: DirtyStats;
   /**
    * Work done by the most recent hit test.
    *
@@ -136,6 +139,16 @@ export class Engine {
   private readonly timer = new FrameTimer();
   private readonly stages = new StageTimer();
 
+  /**
+   * What needs repainting on the static layer.
+   *
+   * The dirty flag `needsStaticRender` answers "is there anything to do"; this
+   * answers "what, exactly". Both are needed: the flag lets the loop skip a
+   * frame with no work at all, and skipping is what keeps an idle canvas at zero
+   * cost.
+   */
+  private readonly dirty = new DirtyTracker();
+
   private rafId: number | null = null;
   private running = false;
 
@@ -160,6 +173,9 @@ export class Engine {
     nodes: 0,
     path: 'all',
     cacheHitRate: 1,
+    dirtyRects: 0,
+    dirtyCoverage: 1,
+    fullRepaint: true,
   };
 
   private lastStages: StageTimings = ZERO_STAGES;
@@ -238,8 +254,21 @@ export class Engine {
     // Any scene change dirties the static layer. In Phase 5 this callback grows
     // teeth: `change.before` and `change.after` become the dirty rectangles, and
     // a moved element contributes both — where it was and where it is.
-    this.scene.subscribe(() => {
+    /* Every scene change contributes its rectangles.
+     *
+     * `change.before` and `change.after` are what Phase 2 put on `SceneChange`
+     * for exactly this moment, three phases before there was anything to use
+     * them for. A moved element supplies both — the place it left, which needs
+     * erasing, and the place it arrived, which needs painting — and forgetting
+     * the first is the classic smear bug. */
+    this.scene.subscribe((change) => {
       this.needsStaticRender = true;
+      this.dirty.addChange(change.before, change.after);
+
+      // `load()` and `clear()` report a null/null change: not a region, a new
+      // scene. Nothing local about that.
+      if (change.before === null && change.after === null) this.dirty.force('global');
+
       // A moved or deleted element changes where the selection outline goes.
       this.selectionBoundsDirty = true;
       this.needsInteractiveRender = true;
@@ -252,7 +281,9 @@ export class Engine {
       onViewportChange: () => {
         // A viewport change moves every element and every grid line, so both
         // layers are invalid. This is the case where full repaint is not just
-        // acceptable but optimal.
+        // acceptable but optimal — there is no subset of the screen that is
+        // still correct, so there is nothing for dirty rectangles to save.
+        this.dirty.force('global');
         this.needsStaticRender = true;
         this.needsInteractiveRender = true;
         this.refreshSnapshot();
@@ -341,7 +372,13 @@ export class Engine {
 
     if (this.needsStaticRender) {
       this.needsStaticRender = false;
-      this.lastRenderStats = this.renderer.render(this.viewport, this.stages);
+      const plan = this.dirty.plan(this.viewport.visibleSceneBounds());
+      // `none` means every collected rectangle was off screen — real work that
+      // correctly resolved to no pixels. Skipping the paint here is not an
+      // optimisation, it is the answer.
+      if (plan.kind !== 'none') {
+        this.lastRenderStats = this.renderer.render(this.viewport, this.stages, plan);
+      }
     }
 
     if (this.needsInteractiveRender) {
@@ -402,6 +439,7 @@ export class Engine {
   }
 
   markDirty(): void {
+    this.dirty.force('global');
     this.needsStaticRender = true;
     this.needsInteractiveRender = true;
   }
@@ -432,11 +470,17 @@ export class Engine {
 
     this.viewport.setSize(cssWidth, cssHeight, dpr);
     this.input.invalidateRect();
+    // Assigning `canvas.width` clears the backing store and resets the
+    // transform, even when assigning the same value. There is no stale content
+    // to preserve because there is no content at all.
+    this.dirty.force('global');
     this.markDirty();
   }
 
   setTheme(theme: Theme): void {
     this.renderer.setTheme(theme);
+    // The background under every element changes. Nothing on screen survives.
+    this.dirty.force('global');
     this.needsStaticRender = true;
   }
 
@@ -610,6 +654,7 @@ export class Engine {
       scrollY: vp.scrollY,
       render: this.lastRenderStats,
       stages: this.lastStages,
+      dirty: this.dirty.stats(),
       hit: this.scene.hitStats,
       idleFrames: this.idleFrames,
     };

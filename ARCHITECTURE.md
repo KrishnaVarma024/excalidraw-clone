@@ -692,6 +692,39 @@ the frame composite becomes `drawImage` per visible tile. This is how map render
 numbers demand it. Write the note in the README — "measured X, so did not add tiles" is a much
 stronger answer than an unmeasured optimisation.
 
+> **Measured in Phase 5, and the numbers do not demand it.** One shape changing in a
+> 50,000-element scene repaints **0.8%** of the screen. There is no headroom left to reclaim in
+> that case, and the case tiles would actually help — panning — forces a full repaint by
+> definition, which no amount of tile caching changes without also caching the *composite*.
+>
+> Revisit when a workload keeps `coverage` above ~30% while `full repaints` stays low. That is the
+> shape of a scene where per-region repainting is doing real work and still losing, and it is the
+> only reading that would justify the memory.
+
+### 6.5 What Phase 5 measured
+
+Full repaint versus dirty rectangles on a static-layer-only workload — 50,000 elements, twenty
+select-and-delete operations, identical build with one line changed:
+
+| | full repaint | dirty rects | |
+|---|---:|---:|---:|
+| frame p50 | 14.70 ms | 12.10 ms | 1.2× |
+| frame p95 | 1074.80 ms | 82.20 ms | **13×** |
+| screen repainted | 100% | 0.8% | |
+| full repaints | 43 | 3 | |
+| wall clock | 21.4 s | 3.3 s | 6.5× |
+
+Two results worth carrying forward.
+
+**p50 moved 1.2× and p95 moved 13×.** §10's insistence on percentiles rather than a mean was not
+theoretical: a mean would have reported this change as barely worth making.
+
+**Whole-frame time while *drawing* barely moved at all** (11.20 → 9.70 ms), because §2's two-canvas
+split already removed the static layer from the drag hot path. The split and dirty rectangles solve
+the same problem — cost that grows with the document — at two different moments: the split covers
+*drawing a new shape*, dirty rects cover *changing an existing one*. They stop overlapping in
+Phase 6, where dragging a committed element mutates the scene every frame.
+
 ---
 
 ## 7. Input and the tool state machine

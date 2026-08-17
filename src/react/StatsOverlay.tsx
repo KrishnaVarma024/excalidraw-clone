@@ -59,6 +59,9 @@ export function StatsOverlay({ engine }: Props) {
   const nodes = useRef<HTMLSpanElement>(null);
   const path = useRef<HTMLSpanElement>(null);
   const hit = useRef<HTMLSpanElement>(null);
+  const dirty = useRef<HTMLSpanElement>(null);
+  const coverage = useRef<HTMLSpanElement>(null);
+  const fulls = useRef<HTMLSpanElement>(null);
   const cache = useRef<HTMLSpanElement>(null);
   const grid = useRef<HTMLSpanElement>(null);
   const idle = useRef<HTMLSpanElement>(null);
@@ -98,6 +101,17 @@ export function StatsOverlay({ engine }: Props) {
       // The broad/narrow ratio of the last click: how many candidates the index
       // handed to the exact geometry test, and how many of those it had to run.
       write(hit.current, `${info.hit.broad} / ${info.hit.narrow}`);
+
+      // The three numbers Phase 5 is judged on. `coverage` is the headline:
+      // the fraction of the screen actually repainted. `full repaints` should
+      // spike during a pan and sit still while drawing — if it climbs while you
+      // draw one shape, something is forcing global invalidation that shouldn't.
+      write(dirty.current, info.render.fullRepaint ? 'full' : String(info.render.dirtyRects));
+      write(coverage.current, `${(info.render.dirtyCoverage * 100).toFixed(1)}%`);
+      write(
+        fulls.current,
+        `${info.dirty.fullRepaints}${info.dirty.lastFullReason ? ` (${info.dirty.lastFullReason})` : ''}`,
+      );
       write(cache.current, `${(info.render.cacheHitRate * 100).toFixed(0)}%`);
       write(grid.current, String(info.render.gridLines));
       write(idle.current, String(info.idleFrames));
@@ -126,6 +140,11 @@ export function StatsOverlay({ engine }: Props) {
       <Row label="index nodes" spanRef={nodes} />
       <Row label="cull path" spanRef={path} />
       <Row label="hit broad/narrow" spanRef={hit} />
+
+      <div className="stats-section">repaint</div>
+      <Row label="dirty rects" spanRef={dirty} />
+      <Row label="coverage" spanRef={coverage} />
+      <Row label="full repaints" spanRef={fulls} />
       <Row label="cache hit" spanRef={cache} />
       <Row label="grid lines" spanRef={grid} />
       <Row label="idle frames" spanRef={idle} />
