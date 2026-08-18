@@ -44,7 +44,7 @@ import { DirtyTracker, type DirtyStats } from './render/DirtyTracker';
 import { InputRouter, type InputDelegate, type PointerInfo } from './input/InputRouter';
 import { Viewport } from './viewport/Viewport';
 import { Scene, type HitStats } from './scene/Scene';
-import { getSceneBounds } from './scene/bounds';
+import { getRenderBounds, getSceneBounds } from './scene/bounds';
 import { DEFAULT_STYLE, type Element, type ElementStyle } from './scene/element.types';
 import { TOOL_SHORTCUTS, ToolManager, type ToolType } from './tools/ToolManager';
 import { Selection } from './tools/Selection';
@@ -57,7 +57,7 @@ import {
   now,
 } from './util/perf';
 import { type GenerateOptions, generateScene } from './dev/generateScene';
-import type { Bounds } from './util/geometry';
+import { boundsIntersect, type Bounds } from './util/geometry';
 
 /** Discrete state React renders from. Changes rarely. */
 export interface EngineSnapshot {
@@ -74,6 +74,15 @@ export interface EngineSnapshot {
   readonly perfMarks: boolean;
   /** How many elements are selected. Discrete, and drives the whole selection UI. */
   readonly selectedCount: number;
+  /**
+   * CSS cursor for the canvas, or null for the tool's default.
+   *
+   * Discrete despite arriving from `pointermove`: it changes when the pointer
+   * crosses a handle boundary, which is a handful of times per gesture, not
+   * once per frame. That is the test for whether something belongs on this
+   * snapshot at all.
+   */
+  readonly cursor: string | null;
 }
 
 /** Per-frame numbers. Delivered outside React. */
@@ -214,6 +223,7 @@ export class Engine {
     panAffordance: false,
     perfMarks: false,
     selectedCount: 0,
+    cursor: null,
   };
 
   private panAffordance = false;
@@ -301,9 +311,17 @@ export class Engine {
   private delegate(): InputDelegate {
     return {
       onPointerDown: (info: PointerInfo) =>
-        this.tools.onPointerDown(info.scene, { ...info, hitThreshold: this.hitThreshold() }),
+        this.tools.onPointerDown(info.scene, { ...info, hitThreshold: this.hitThreshold(), zoom: this.viewport.zoom }),
       onPointerMove: (info: PointerInfo) =>
-        this.tools.onPointerMove(info.scene, { ...info, hitThreshold: this.hitThreshold() }),
+        this.tools.onPointerMove(info.scene, { ...info, hitThreshold: this.hitThreshold(), zoom: this.viewport.zoom }),
+      onPointerHover: (info: PointerInfo) => {
+        // Only notifies when the answer CHANGED. A hover handler that pushed a
+        // snapshot on every mouse move would re-render React 60 times a second
+        // to set the same string.
+        if (this.tools.onPointerHover(info.scene, { ...info, hitThreshold: this.hitThreshold(), zoom: this.viewport.zoom })) {
+          this.refreshSnapshot();
+        }
+      },
       onPointerUp: () => {
         this.tools.onPointerUp();
       },
@@ -410,11 +428,48 @@ export class Engine {
   /**
    * What the interactive layer draws on top of the draft.
    *
-   * Outlines are computed from what is **on screen**, not from the whole
-   * selection: an outline you cannot see costs the same to stroke as one you
-   * can. `elementsInBox` is an index query, so this tracks the viewport rather
-   * than the document — the entire point of Phase 4a, reused.
+   * Called on every interactive frame, which since Phase 6 means every frame of
+   * a drag. See `visibleSelection` for why that mattered.
    */
+  /**
+   * The selected elements that are actually on screen.
+   *
+   * ── Why this is not an index query ─────────────────────────────────────────
+   *
+   * The obvious version — and the version this shipped with from Phase 4b until
+   * Phase 6 measured it — asks the spatial index for everything in the viewport
+   * and filters that down to the selection:
+   *
+   *     scene.elementsInBox(viewport).filter((el) => selection.has(el.id))
+   *
+   * That reads well and it is quadratically wrong in the wrong direction. It
+   * costs O(elements on screen) to produce a result bounded by
+   * MAX_SELECTION_OUTLINES. Zoomed out over 50,000 elements it builds a
+   * 50,000-entry array and throws away 49,999 of them — 85 ms, every frame,
+   * inside a gesture, while the cull and the draw it was competing with had both
+   * been optimised down to 0.00 ms.
+   *
+   * The right way round is to iterate the *smaller* set. The selection is at
+   * most MAX_SELECTION_OUTLINES here, so this is bounded by a constant and it
+   * does the viewport cull as well.
+   *
+   * The lesson generalises: **an index makes a query cheap, it does not make it
+   * free, and asking a cheap question about a large set is still worse than
+   * asking a direct question about a small one.** Phase 4a built the index and
+   * this is the first place it was reached for reflexively rather than because
+   * the shape of the problem asked for it.
+   */
+  private visibleSelection(): Element[] {
+    const view = this.viewport.visibleSceneBounds();
+    const out: Element[] = [];
+    for (const id of this.selection.ids()) {
+      const el = this.scene.get(id);
+      if (el === undefined || el.isDeleted) continue;
+      if (boundsIntersect(getRenderBounds(el), view)) out.push(el);
+    }
+    return out;
+  }
+
   private overlay(): SelectionOverlay {
     if (this.selectionBoundsDirty) {
       this.selectionBounds = this.scene.boundsOf(this.selection.ids());
@@ -422,12 +477,7 @@ export class Engine {
     }
 
     const count = this.selection.size;
-    const outlines =
-      count === 0 || count > MAX_SELECTION_OUTLINES
-        ? []
-        : this.scene
-            .elementsInBox(this.viewport.visibleSceneBounds())
-            .filter((el) => this.selection.has(el.id));
+    const outlines = count === 0 || count > MAX_SELECTION_OUTLINES ? [] : this.visibleSelection();
 
     return {
       outlines,
@@ -435,6 +485,10 @@ export class Engine {
       // the group box when it is actually grouping something.
       groupBounds: count > 1 ? this.selectionBounds : null,
       marquee: this.tools.marqueeBox,
+      // Handles only while the selection tool is active: they are that tool's
+      // affordance, and leaving them up under the rectangle tool invites clicks
+      // that will not do what they look like they will.
+      transform: this.tools.activeTool === 'selection' ? this.tools.transformBox : null,
     };
   }
 
@@ -612,6 +666,7 @@ export class Engine {
       panAffordance: this.panAffordance,
       perfMarks: this.stages.isMarking,
       selectedCount: this.selection.size,
+      cursor: this.tools.cursor,
     };
 
     const prev = this.snapshot;
@@ -624,7 +679,11 @@ export class Engine {
       prev.canZoomOut === next.canZoomOut &&
       prev.panAffordance === next.panAffordance &&
       prev.perfMarks === next.perfMarks &&
-      prev.selectedCount === next.selectedCount
+      prev.selectedCount === next.selectedCount &&
+      /* Phase 5's lesson, applied without having to relearn it: a field added to
+         the snapshot and not to this comparison is a field React never observes
+         changing. The perfMarks checkbox shipped dead for exactly one build. */
+      prev.cursor === next.cursor
     ) {
       return; // nothing React can observe changed — do not touch the reference
     }

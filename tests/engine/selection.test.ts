@@ -16,12 +16,15 @@ import { newRectangle } from '@engine/scene/elementFactory';
 import { DEFAULT_STYLE, TRANSPARENT, type Element } from '@engine/scene/element.types';
 import { generateScene } from '@engine/dev/generateScene';
 import { hitTestElement } from '@engine/scene/hitTest';
+import { MIN_SIZE, ROTATE_OFFSET_PX } from '@engine/scene/transform';
 import type { Bounds, Point } from '@engine/util/geometry';
 
 const FILLED = { ...DEFAULT_STYLE, backgroundColor: '#a5d8ff' };
 
 const mods = (over: Partial<PointerModifiers> = {}): PointerModifiers => ({
   shiftKey: false,
+  altKey: false,
+  zoom: 1,
   hitThreshold: 5,
   pressure: 0.5,
   pointerType: 'mouse',
@@ -357,6 +360,232 @@ describe('the selection tool', () => {
       tools.selectAll();
       tools.cancel();
       expect(selection.isEmpty).toBe(true);
+    });
+  });
+
+  /* ── transform gestures (Phase 6) ───────────────────────────────────────── */
+
+  describe('press and drag to move', () => {
+    /**
+     * The whole gesture is three calls, and the state between them lives in one
+     * `DragState` captured on pointerdown. That is what makes it testable in
+     * Node: no canvas, no DOM, no pointer capture.
+     */
+    it('moves the selected shape instead of starting a marquee', () => {
+      const el = box(0, 0, 1);
+      scene.add(el);
+
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerMove(at(70, 45), mods());
+      tools.onPointerUp();
+
+      const after = scene.get(el.id)!;
+      expect(after.x).toBeCloseTo(50, 8);
+      expect(after.y).toBeCloseTo(25, 8);
+      expect(tools.marqueeBox).toBeNull();
+    });
+
+    it('ignores a twitch, so clicking does not nudge', () => {
+      /* Without the threshold every selection click moves the shape by a pixel
+         or two. Users experience that as the canvas being "twitchy" and never
+         report it precisely enough to find. */
+      const el = box(0, 0, 1);
+      scene.add(el);
+
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerMove(at(21, 20), mods());
+      tools.onPointerUp();
+
+      const after = scene.get(el.id)!;
+      expect(after.x).toBe(0);
+      expect(after.y).toBe(0);
+    });
+
+    it('moves the whole selection together', () => {
+      const a = box(0, 0, 1);
+      const b = box(100, 0, 2);
+      scene.add(a);
+      scene.add(b);
+
+      tools.selectAll();
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerMove(at(20, 220), mods());
+      tools.onPointerUp();
+
+      expect(scene.get(a.id)!.y).toBeCloseTo(200, 8);
+      expect(scene.get(b.id)!.y).toBeCloseTo(200, 8);
+      expect(scene.get(b.id)!.x).toBeCloseTo(100, 8); // relative layout preserved
+    });
+
+    it('does not start a move on shift-click', () => {
+      // Shift-click is a selection gesture. Starting a drag here nudges the
+      // shape the user was only trying to add to the selection.
+      const a = box(0, 0, 1);
+      const b = box(100, 0, 2);
+      scene.add(a);
+      scene.add(b);
+
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerUp();
+      tools.onPointerDown(at(120, 20), mods({ shiftKey: true }));
+      tools.onPointerMove(at(200, 100), mods({ shiftKey: true }));
+      tools.onPointerUp();
+
+      expect(selection.size).toBe(2);
+      expect(scene.get(b.id)!.x).toBe(100);
+    });
+
+    it('puts everything back exactly on Escape', () => {
+      /* Restoring from the snapshot is exact. "Apply the inverse delta" leaves
+         floating-point residue, so a cancelled drag would leave the shape a
+         fraction of a unit from where it started — every time. */
+      const el = box(10, 20, 1);
+      scene.add(el);
+
+      tools.onPointerDown(at(30, 40), mods());
+      tools.onPointerMove(at(333.7, 291.3), mods());
+      tools.cancel();
+
+      const after = scene.get(el.id)!;
+      expect(after.x).toBe(10);
+      expect(after.y).toBe(20);
+    });
+  });
+
+  describe('handles win over whatever is behind them', () => {
+    it('resizes from a corner rather than selecting the shape underneath', () => {
+      /* Handles are drawn on top and sit partly OUTSIDE the shape they belong
+         to. Hit-test elements first and grabbing a corner selects whatever
+         happens to be behind it — which reads as "the handles do not work". */
+      const front = box(0, 0, 2);            // selected, 40×40 at the origin
+      const behind = box(30, 30, 1);         // sits under the 'se' handle
+      scene.add(behind);
+      scene.add(front);
+
+      tools.onPointerDown(at(20, 20), mods()); // select the front one
+      tools.onPointerUp();
+      expect([...selection.ids()]).toEqual([front.id]);
+
+      tools.onPointerDown(at(40, 40), mods()); // the 'se' handle
+      tools.onPointerMove(at(140, 140), mods());
+      tools.onPointerUp();
+
+      expect([...selection.ids()]).toEqual([front.id]); // selection unchanged
+      expect(scene.get(front.id)!.width).toBeCloseTo(140, 6);
+      expect(scene.get(behind.id)!.width).toBe(40);     // untouched
+    });
+
+    it('rotates from the handle floating above the shape', () => {
+      const el = box(0, 0, 1); // 40×40, centre (20, 20)
+      scene.add(el);
+
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerUp();
+
+      tools.onPointerDown(at(20, -ROTATE_OFFSET_PX), mods());
+      tools.onPointerMove(at(500, 20), mods()); // straight to the right
+      tools.onPointerUp();
+
+      const after = scene.get(el.id)!;
+      expect(after.angle).toBeCloseTo(Math.PI / 2, 6);
+      expect(after.width).toBe(40); // rotation changes the angle and nothing else
+      expect(after.x).toBe(0);
+    });
+
+    it('refuses to collapse a shape to nothing', () => {
+      const el = box(0, 0, 1);
+      scene.add(el);
+
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerUp();
+      tools.onPointerDown(at(40, 40), mods());
+      tools.onPointerMove(at(0, 0), mods());
+      tools.onPointerUp();
+
+      expect(scene.get(el.id)!.width).toBe(MIN_SIZE);
+    });
+
+    it('exposes the box the overlay draws its handles on', () => {
+      const el = box(10, 20, 1);
+      scene.add(el);
+      expect(tools.transformBox).toBeNull();
+
+      tools.onPointerDown(at(30, 40), mods());
+      tools.onPointerUp();
+
+      expect(tools.transformBox).toEqual({
+        bounds: { minX: 10, minY: 20, maxX: 50, maxY: 60 },
+        angle: 0,
+      });
+    });
+
+    it('gives a multi-selection an axis-aligned box', () => {
+      // There is no meaningful shared rotation for a group of differently
+      // rotated shapes, and inventing one produces handles that line up with
+      // nothing on screen.
+      const a = newRectangle({ x: 0, y: 0, width: 40, height: 40, style: FILLED, zIndex: 1, angle: 0.9 });
+      const b = box(100, 0, 2);
+      scene.add(a);
+      scene.add(b);
+      tools.selectAll();
+
+      expect(tools.transformBox!.angle).toBe(0);
+    });
+  });
+
+  describe('hover', () => {
+    it('reports a cursor over a handle and nothing over open canvas', () => {
+      const el = box(0, 0, 1); // 40×40
+      scene.add(el);
+      expect(tools.cursor).toBeNull();
+
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerUp();
+
+      expect(tools.onPointerHover(at(40, 40), mods())).toBe(true);
+      expect(tools.cursor).toBe('nwse-resize');
+
+      expect(tools.onPointerHover(at(500, 500), mods())).toBe(true);
+      expect(tools.cursor).toBeNull();
+    });
+
+    it('reports a change only when the answer actually changed', () => {
+      /* The reason this returns a boolean at all. The Engine calls
+         `refreshSnapshot` on true, and a hover that claimed a change every time
+         would push a new snapshot 60 times a second to set the same string. */
+      const el = box(0, 0, 1);
+      scene.add(el);
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerUp();
+
+      expect(tools.onPointerHover(at(40, 40), mods())).toBe(true);
+      expect(tools.onPointerHover(at(41, 41), mods())).toBe(false); // same handle
+    });
+
+    it('never touches the scene index', () => {
+      // Nine distance checks against a box the tool already has. The expensive
+      // question — what element is under the pointer — is still asked only on
+      // press, which is what Phase 4b was careful about.
+      const el = box(0, 0, 1);
+      scene.add(el);
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerUp();
+
+      const spy = vi.spyOn(scene, 'hitTest');
+      for (let x = 0; x < 100; x++) tools.onPointerHover(at(x, 20), mods());
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('says nothing while a shape tool is active', () => {
+      const el = box(0, 0, 1);
+      scene.add(el);
+      tools.onPointerDown(at(20, 20), mods());
+      tools.onPointerUp();
+      tools.onPointerHover(at(40, 40), mods());
+
+      tools.setTool('rectangle');
+      tools.onPointerHover(at(40, 40), mods());
+      expect(tools.cursor).toBeNull();
     });
   });
 

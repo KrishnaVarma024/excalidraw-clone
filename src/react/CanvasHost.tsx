@@ -42,6 +42,7 @@ export function CanvasHost({ onEngineReady }: Props) {
   const staticRef = useRef<HTMLCanvasElement>(null);
   const interactiveRef = useRef<HTMLCanvasElement>(null);
   const [panAffordance, setPanAffordance] = useState(false);
+  const [cursor, setCursor] = useState<string | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -110,7 +111,9 @@ export function CanvasHost({ onEngineReady }: Props) {
        The one piece of engine state this component re-renders for, and it is
        genuinely discrete: it flips when space goes down or up, not per frame. */
     const unsubscribe = engine.subscribe(() => {
-      setPanAffordance(engine.getSnapshot().panAffordance);
+      const snap = engine.getSnapshot();
+      setPanAffordance(snap.panAffordance);
+      setCursor(snap.cursor);
     });
 
     engine.start();
@@ -134,7 +137,10 @@ export function CanvasHost({ onEngineReady }: Props) {
       <canvas
         ref={interactiveRef}
         className="layer layer-interactive"
-        style={{ cursor: panAffordance ? 'grabbing' : 'crosshair' }}
+        /* Panning wins over everything — space-drag is modal. Otherwise the
+           tool's own answer, which is a handle cursor when one is under the
+           pointer and null the rest of the time. */
+        style={{ cursor: panAffordance ? 'grabbing' : (cursor ?? 'crosshair') }}
         aria-label="Drawing canvas. Pick a tool from the toolbar, then drag to draw."
         role="img"
       />

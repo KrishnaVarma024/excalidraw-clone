@@ -83,6 +83,15 @@ export interface PointerInfo {
 export interface InputDelegate {
   onPointerDown(info: PointerInfo): boolean;
   onPointerMove(info: PointerInfo): void;
+  /**
+   * The pointer moved with no button down.
+   *
+   * Separate from `onPointerMove` on purpose. A drag and a hover are different
+   * questions — "what should this gesture do next" versus "what would happen if
+   * I pressed here" — and merging them means every tool has to re-derive which
+   * one it is from state the router already knows.
+   */
+  onPointerHover(info: PointerInfo): void;
   onPointerUp(info: PointerInfo): void;
   onCancel(): void;
   /** Unhandled keydown, for tool shortcuts. Return true if consumed. */
@@ -217,7 +226,15 @@ export class InputRouter {
          exactly right. */
       const samples = e.getCoalescedEvents?.() ?? [e];
       for (const sample of samples) this.delegate.onPointerMove(this.info(sample));
+      return;
     }
+
+    /* Idle: no button down, no pan. This is the hover channel, and it exists so
+       the cursor can tell you a handle is grabbable before you find out by
+       missing it. Coalesced samples are deliberately NOT unpacked here — hover
+       only cares where the pointer is now, and replaying the throttled samples
+       would be work whose result is overwritten microseconds later. */
+    if (this.gesture === 'none') this.delegate.onPointerHover(this.info(e));
   };
 
   private onPointerUp = (e: PointerEvent): void => {

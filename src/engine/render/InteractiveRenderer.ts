@@ -38,12 +38,15 @@ import type { Viewport } from '../viewport/Viewport';
 import type { Element } from '../scene/element.types';
 import type { Bounds } from '../util/geometry';
 import { getElementCenter, getGeometryBounds } from '../scene/bounds';
+import { HANDLE_SIZE_PX, getHandlePositions } from '../scene/transform';
 import { createRoughCanvas, drawElement } from './drawElement';
 import { RoughCache } from './roughCache';
 import type { RoughCanvas } from 'roughjs/bin/canvas';
 
 /** Everything drawn on top of the draft: selection feedback. */
 export interface SelectionOverlay {
+  /** The transform box and its rotation, when something is selected. */
+  readonly transform: { readonly bounds: Bounds; readonly angle: number } | null;
   /** Selected elements that are currently on screen. May be empty by policy. */
   readonly outlines: readonly Element[];
   /** Box round the whole selection. Null for 0 or 1 elements. */
@@ -52,10 +55,16 @@ export interface SelectionOverlay {
   readonly marquee: Bounds | null;
 }
 
-const EMPTY_OVERLAY: SelectionOverlay = { outlines: [], groupBounds: null, marquee: null };
+const EMPTY_OVERLAY: SelectionOverlay = {
+  outlines: [],
+  groupBounds: null,
+  marquee: null,
+  transform: null,
+};
 
 const ACCENT = '#5b57d1';
 const MARQUEE_FILL = 'rgba(91, 87, 209, 0.08)';
+const HANDLE_FILL = '#ffffff';
 
 export class InteractiveRenderer {
   private readonly rough: RoughCanvas;
@@ -92,7 +101,8 @@ export class InteractiveRenderer {
       draft === null &&
       overlay.outlines.length === 0 &&
       overlay.groupBounds === null &&
-      overlay.marquee === null;
+      overlay.marquee === null &&
+      overlay.transform === null;
     if (nothingToDo) return false;
 
     const m = vp.deviceMatrix();
@@ -143,6 +153,10 @@ export class InteractiveRenderer {
       ctx.setLineDash([]);
     }
 
+    if (overlay.transform !== null) {
+      this.drawHandles(overlay.transform.bounds, overlay.transform.angle, zoom);
+    }
+
     if (overlay.marquee !== null) {
       const b = overlay.marquee;
       const w = b.maxX - b.minX;
@@ -152,6 +166,70 @@ export class InteractiveRenderer {
       ctx.lineWidth = 1 / zoom;
       ctx.setLineDash([]);
       ctx.strokeRect(b.minX, b.minY, w, h);
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * The eight resize handles and the rotation handle.
+   *
+   * ── Everything here is divided by zoom, and that is the whole point ───────
+   *
+   * Handles are chrome, not content: an 8-pixel square at 10% zoom and at 3000%
+   * zoom, so they are always the same thing to aim at. In scene units that is
+   * `8 / zoom`, and the same applies to the stalk connecting the rotation
+   * handle and to every stroke width.
+   *
+   * Miss one division and the handles either vanish into single pixels when you
+   * zoom out or grow into slabs that cover the shape when you zoom in — and
+   * either way the tool becomes unusable at one end of the range while looking
+   * perfect at the other.
+   */
+  private drawHandles(box: Bounds, angle: number, zoom: number): void {
+    const { ctx } = this;
+    const size = HANDLE_SIZE_PX / zoom;
+    const half = size / 2;
+
+    ctx.save();
+    ctx.lineWidth = 1 / zoom;
+    ctx.strokeStyle = ACCENT;
+
+    const handles = getHandlePositions(box, angle, zoom);
+
+    // The stalk from the top edge to the rotation handle, so it reads as
+    // attached to the shape rather than floating near it.
+    const top = handles.find((h) => h.kind === 'n');
+    const rotate = handles.find((h) => h.kind === 'rotate');
+    if (top !== undefined && rotate !== undefined) {
+      ctx.beginPath();
+      ctx.moveTo(top.point.x, top.point.y);
+      ctx.lineTo(rotate.point.x, rotate.point.y);
+      ctx.stroke();
+    }
+
+    for (const h of handles) {
+      ctx.fillStyle = HANDLE_FILL;
+      if (h.kind === 'rotate') {
+        // Round, because it does something different from the eight squares.
+        // Shape carries the affordance; colour alone would not.
+        ctx.beginPath();
+        ctx.arc(h.point.x, h.point.y, half, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        continue;
+      }
+
+      ctx.save();
+      if (angle !== 0) {
+        // Rotate the squares with the shape so they sit square to its edges.
+        ctx.translate(h.point.x, h.point.y);
+        ctx.rotate(angle);
+        ctx.translate(-h.point.x, -h.point.y);
+      }
+      ctx.fillRect(h.point.x - half, h.point.y - half, size, size);
+      ctx.strokeRect(h.point.x - half, h.point.y - half, size, size);
+      ctx.restore();
     }
 
     ctx.restore();

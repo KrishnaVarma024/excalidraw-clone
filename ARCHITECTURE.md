@@ -725,6 +725,43 @@ the same problem — cost that grows with the document — at two different mome
 *drawing a new shape*, dirty rects cover *changing an existing one*. They stop overlapping in
 Phase 6, where dragging a committed element mutates the scene every frame.
 
+### 6.6 What Phase 6 measured — the same technique, on the workload it was built for
+
+50,000 elements, one shape selected, dragged in a 120-step circle. Identical build, one line
+changed to force a full repaint:
+
+| | full repaint | dirty rects | |
+|---|---:|---:|---:|
+| frame p50 | 858.70 ms | 7.70 ms | **112×** |
+| frame p95 | 1236.10 ms | 21.20 ms | 58× |
+| elements redrawn per frame | 49,819 | 7 | |
+| screen repainted | 100% | < 0.1% | |
+| wall clock, one drag | 122.8 s | 8.3 s | 15× |
+
+§6.5's caveat — *"whole-frame time while drawing barely moved"* — is why this workload exists. The
+two-canvas split covers drawing; only a committed element moving exercises the static layer every
+frame, and this is the number that pays for the phase.
+
+**A bug this measurement found, which had been shipping since Phase 4b.** The selection overlay
+computed its outlines like this:
+
+```ts
+scene.elementsInBox(viewport.visibleSceneBounds()).filter((el) => selection.has(el.id))
+```
+
+Correct, and backwards. It costs O(elements on screen) to produce a result capped at 200 outlines.
+Zoomed out over 50,000 elements the interactive stage read **84.9 ms per frame** while `cull` and
+`draw` — both optimised in earlier phases — read 0.00 ms. Iterating the selection and culling each
+member against the viewport is bounded by the cap instead: **0.10 ms**.
+
+Two things made it invisible for two phases. Selection outlines only render while something is
+selected, and before Phase 6 nothing held a gesture open for three seconds. And the code *looked*
+right: it used the index Phase 4a built, which is exactly the reflex the index encourages.
+
+> **An index makes a query cheap. It does not make it free.** Asking a cheap question about a large
+> set is still worse than asking a direct question about a small one, and the direction of the join
+> is a decision, not a detail.
+
 ---
 
 ## 7. Input and the tool state machine
@@ -786,6 +823,55 @@ Two rules that keep this clean:
    history, and can be cancelled with `Escape` by simply throwing it away.
 2. **One history entry per gesture**, pushed on commit — not per `pointermove`. Otherwise one
    drag produces 400 undo steps.
+
+### 7.3 Transforms: from a snapshot, never incrementally
+
+Every transform function takes the element **as it was when the pointer went down**, plus where the
+pointer is now, and returns what the element should be. Nothing reads the element's current state;
+nothing accumulates.
+
+```ts
+resizeGeometry(original: GeometryPatch, handle, pointer, modifiers): GeometryPatch
+```
+
+The incremental alternative — apply this frame's delta to whatever the shape is now — is the
+obvious implementation and it is wrong in three separate ways:
+
+| | Incremental | Snapshot |
+|---|---|---|
+| **Drift** | 60 float operations per second; a shape returned to its starting pixel is thousandths off, and a rotation of 360° leaves a square un-square | pointer back at its origin ⇒ *bit-exact* original |
+| **Modifiers** | Shift pressed mid-gesture locks to the shape's accidental current ratio | locks to the ratio the user actually drew, and releasing it resumes following the cursor exactly |
+| **Undo (§8)** | a diff of a diff | "was X, now Y" for free |
+
+Measured: dragging a resize handle out 100 units and back, one frame at a time, leaves an
+incremental implementation ~2×10⁻¹³ narrower than it started. Invisible once. Not invisible after
+ten minutes of fiddling with two shapes that were supposed to line up.
+
+**Rotation is handled by moving the pointer, not the shape.** Resizing a rotated rectangle by
+computing rotated corner positions is a page of trigonometry with a sign error hiding in it.
+Instead:
+
+1. Rotate the pointer *into* the element's local, un-rotated frame.
+2. Resize there, where the maths is `width = |pointer.x − anchor.x|` and nothing else.
+3. Rotate the resulting **centre** back out to world space.
+
+Step 3 is the one people miss. Resizing in local space moves the local centre, and the anchor has
+to stay fixed in *world* space — so the new world centre is the old one plus the local centre
+delta, rotated. Skip it and a rotated shape crawls sideways as you resize it, which looks like a
+physics bug and is a missing rotation. This is the same trick as §5.5's hit test (rotate the point,
+not the shape) and the mirror of `drawElement` (rotate the canvas, not the shape).
+
+**Group resize has a documented limitation.** For a *rotated* child under a *non-uniform* scale the
+mathematically correct result is a sheared shape, and shear is not representable in
+`{x, y, width, height, angle}`. The options are a full 2×3 matrix per element, baking the shear into
+the geometry, or accepting the approximation. v1 accepts it: exact when `sx === sy` (which
+Shift-drag guarantees), visibly wrong only for rotated children under strong non-uniform scaling.
+Refusing to resize such groups is worse, because the user cannot tell why nothing happens.
+
+**Handles are a constant size on screen**, so every handle dimension is divided by zoom before use.
+A handle that scaled with the document is a speck at 10% and covers the shape at 3000%. The same
+applies to the cursor: the handle called `nw` on a shape rotated a quarter turn is visually in the
+top-*right*, so the resize cursor is derived from the handle direction **plus** the element's angle.
 
 ---
 
