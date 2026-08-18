@@ -21,21 +21,29 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 5 of 11 — dirty-rectangle rendering.** The last of the three headline techniques. The
-render loop is inverted: the screen is already correct, so only what changed gets repaired.
+**Phase 6 of 11 — move, resize, rotate, multi-select.** Where Phase 5's dirty rectangles get
+spent. Drawing a new shape never touched the static layer — the draft lives on the interactive
+canvas. Dragging a *committed* element mutates the scene on every frame, so it does.
 
-Measured on the workload that isolates the static layer — 50,000 elements, then twenty
-select-and-delete operations, one line changed to force a full repaint for the comparison:
+Same 50,000-element scene, same 120-step circular drag of one shape, one line changed to force a
+full repaint for the comparison:
 
 | | full repaint | dirty rects | |
 |---|---:|---:|---:|
-| frame p50 | 14.70 ms | 12.10 ms | 1.2× |
-| frame **p95** | 1074.80 ms | **82.20 ms** | **13×** |
-| screen repainted | 100% | **0.8%** | |
-| wall clock, 20 deletions | 21.4 s | **3.3 s** | 6.5× |
+| frame **p50** | 858.70 ms | **7.70 ms** | **112×** |
+| frame **p95** | 1236.10 ms | **21.20 ms** | 58× |
+| elements redrawn per frame | 49,819 | **7** | |
+| screen repainted | 100% | **< 0.1%** | |
+| wall clock, one drag | 122.8 s | **8.3 s** | 15× |
 
-p50 moved 1.2× and p95 moved 13×. Jank lives in the tail, which is why the overlay has reported
-p50 *and* p95 since Phase 1 — a mean would have called this change not worth making.
+Phase 5 measured 13× on p95 and called the rest *"banked, not spent"*. This is the withdrawal.
+
+The phase also found a bug that had been shipping since Phase 4b. The selection overlay asked the
+spatial index for every element in the viewport and filtered that down to the selection — correct,
+and backwards. It costs O(elements on screen) to produce a result capped at 200. Zoomed out over
+50,000 elements it was **84.9 ms per frame**, sitting next to a cull and a draw that had both been
+optimised to 0.00 ms. Iterating the selection instead: **0.10 ms**. Nothing before this phase could
+hold a gesture open long enough for it to show up.
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -48,7 +56,7 @@ p50 *and* p95 since Phase 1 — a mean would have called this change not worth m
 | 4a | Quadtree spatial index | ✅ |
 | 4b | Hit detection and selection | ✅ |
 | 5 | Dirty-rectangle renderer | ✅ |
-| 6 | Move, resize, rotate, multi-select | — |
+| 6 | Move, resize, rotate, multi-select | ✅ |
 | 7 | Text | — |
 | 8 | Undo/redo, persistence | — |
 | 9 | PNG and SVG export | — |
@@ -141,6 +149,9 @@ pessimisation in the common path."* It then caught exactly that.
 | Screen repainted when one shape changes at 50k | **0.8%** |
 | Frame p95 across 20 deletions at 50k | **1074.8 ms → 82.2 ms** (13×) |
 | Full repaints across that workload | **43 → 3** |
+| Frame p50 while dragging one shape at 50k | **858.7 ms → 7.7 ms** (112×) |
+| Elements redrawn per frame during that drag | **49,819 → 7** |
+| Selection-overlay cost per frame, zoomed out at 50k | **84.9 ms → 0.10 ms** |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -205,7 +216,7 @@ src/
     spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      337 tests, all in Node. ~9s, no jsdom.
+tests/engine/      402 tests, all in Node. ~9s, no jsdom.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 

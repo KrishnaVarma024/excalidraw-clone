@@ -32,15 +32,17 @@ export function App() {
       )}
 
       <div className="badge">
-        <strong>Phase 5 — dirty-rectangle rendering.</strong>
+        <strong>Phase 6 — move, resize, rotate.</strong>
         <br />
-        The screen is already correct; only what changed gets repaired. Load{' '}
-        <em>50k</em>, then draw one shape and watch <em>coverage</em> — the fraction
-        of the screen actually repainted. It should be a fraction of a percent.
+        Every gesture transforms from the <em>snapshot</em> taken when the pointer
+        landed, never from the shape&rsquo;s current state. Press Shift mid-resize:
+        the ratio locks to what you originally drew, not to whatever the shape
+        happens to be at that instant. Incremental code cannot do that.
         <br />
-        Now pan. <em>full repaints</em> climbs, and its reason says{' '}
-        <em>global</em>: every pixel moved, so there is nothing for dirty rectangles
-        to save. Knowing when to give up is the whole trick.
+        Load <em>50k</em>, select a shape and drag it. <em>coverage</em> stays
+        around a percent — this is where Phase 5 gets spent, because a committed
+        element moving mutates the scene on every frame. Select twenty and drag:
+        it flips to <em>full</em>, which is the fallback working.
       </div>
     </div>
   );
