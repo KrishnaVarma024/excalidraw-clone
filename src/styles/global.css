@@ -65,7 +65,10 @@ canvas {
 .badge {
   position: absolute;
   left: 16px;
-  bottom: 16px;
+  /* Sits above the history controls, which own the corner itself. Undo and redo
+     are reached for without looking, so they get the corner; the badge is read
+     once and then ignored. */
+  bottom: 72px;
   padding: 10px 14px;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -609,4 +612,72 @@ canvas {
 
 .text-editor:focus {
   outline: 0;
+}
+
+/* ── history controls ─────────────────────────────────────────────────────────
+   Bottom-left, opposite the zoom controls. Undo and redo are the two commands a
+   user reaches for without looking, so they get a corner rather than a slot in a
+   crowded toolbar. */
+.history-controls {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+  z-index: 2;
+}
+
+.history-buttons {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+}
+
+.history-buttons button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.history-buttons button:hover:not(:disabled) {
+  background: rgba(127, 127, 140, 0.14);
+}
+
+/* Disabled rather than hidden: a greyed-out undo says "there is nothing to
+   undo", where a missing button says nothing at all and leaves the user
+   wondering whether the feature exists. */
+.history-buttons button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.history-warning {
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  background: #fff4e6;
+  color: #8a4b00;
+  border: 1px solid #ffd8a8;
+}
+
+@media (prefers-color-scheme: dark) {
+  .history-warning {
+    background: #3b2a12;
+    color: #ffd8a8;
+    border-color: #6b4a1a;
+  }
 }

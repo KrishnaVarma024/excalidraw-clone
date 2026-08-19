@@ -140,6 +140,19 @@ export interface ToolCallbacks {
   /** The active tool changed — React needs to know. */
   onToolChange: (tool: ToolType) => void;
   /**
+   * A user gesture began. Everything the scene does until `onGestureEnd` is one
+   * undo step.
+   *
+   * The tool signals the boundary; it does not know what history is. That split
+   * matters more than it looks: the *only* thing that knows where a gesture
+   * starts and stops is the state machine that runs it, and every alternative —
+   * a timeout, coalescing by element id, diffing the scene per frame — is a
+   * heuristic that gets one of the cases wrong.
+   */
+  onGestureStart: (label: string) => void;
+  /** The gesture ended. `committed` is false for a cancelled one. */
+  onGestureEnd: (committed: boolean) => void;
+  /**
    * Open the text editor on this element, or close it when null.
    *
    * The tool decides *when* editing starts; it does not know what an editor is.
@@ -281,6 +294,16 @@ export class ToolManager {
 
   /** @returns true if the tool consumed the event (so panning should not run). */
   onPointerDown(scene: Point, mod: PointerModifiers): boolean {
+    /* One gesture, one undo step. Opened here and closed in `onPointerUp` or
+       `cancel`, so every scene change between them collapses into a single
+       entry — including the ~180 mutations a three-second drag produces.
+
+       Opened even for gestures that turn out to change nothing (a marquee, a
+       click on empty canvas). An empty batch pushes no entry, so the cost of
+       being liberal here is zero and the cost of being careful is a gesture
+       somebody forgets to wrap. */
+    this.cb.onGestureStart(this.tool === 'selection' ? 'edit' : `draw ${this.tool}`);
+
     if (this.tool === 'selection') return this.beginSelection(scene, mod);
     if (this.tool === 'text') return this.beginText(scene);
 
@@ -386,6 +409,15 @@ export class ToolManager {
 
   /** @returns the committed element, or null if the gesture produced nothing. */
   onPointerUp(): Element | null {
+    const element = this.finishPointerUp();
+    /* Closes the batch opened on pointerdown — unless the text editor took a
+       nested one, in which case this decrements and the editor's `endTextEdit`
+       closes it. Typing is part of the same undo step as creating the run. */
+    this.cb.onGestureEnd(true);
+    return element;
+  }
+
+  private finishPointerUp(): Element | null {
     if (this.drag !== null) {
       this.endTransform();
       return null;
@@ -424,6 +456,12 @@ export class ToolManager {
    * the opposite of that.
    */
   cancel(): void {
+    /* Aborted, not committed. A cancelled drag has already put every element
+       back where it started — recording that round trip would give the user an
+       undo step that does nothing, which is worse than no step at all because
+       they will press it twice. */
+    this.cb.onGestureEnd(false);
+
     if (this.drag !== null) {
       // Put everything back exactly as it was. Restoring from the snapshot is
       // exact; "apply the inverse delta" would leave floating-point residue.
@@ -507,6 +545,12 @@ export class ToolManager {
     this.cb.onSelectionChange();
     this.cb.onCommit(el);
     this.editing = el.id;
+    /* A nested batch that outlives the pointer gesture. `onPointerUp` will close
+       the outer one and this stays open until `endTextEdit`, so creating the
+       element and everything typed into it is ONE undo step — which is what a
+       user means by "undo that". Per-keystroke entries would take forty undos to
+       remove a sentence. */
+    this.cb.onGestureStart('type');
     this.cb.onEditText(el.id);
     return true;
   }
@@ -528,6 +572,7 @@ export class ToolManager {
 
     if (this.selection.set([hit.id])) this.cb.onSelectionChange();
     this.editing = hit.id;
+    this.cb.onGestureStart('edit text');
     this.cb.onEditText(hit.id);
     return true;
   }
@@ -565,6 +610,10 @@ export class ToolManager {
     this.editing = null;
     if (id === null) return;
 
+    // Closes the batch opened when the editor opened. Everything typed since is
+    // one entry.
+    this.cb.onGestureEnd(true);
+
     const el = this.scene.get(id);
     if (el !== undefined && el.type === 'text' && el.text.trim() === '') {
       this.scene.remove(id);
@@ -577,6 +626,7 @@ export class ToolManager {
   /** Font settings for new text, and applied to any selected text elements. */
   setTextStyle(patch: Partial<{ fontSize: number; fontFamily: FontFamily; textAlign: TextAlign }>): void {
     this.textStyle = { ...this.textStyle, ...patch };
+    this.cb.onGestureStart('font');
 
     for (const id of this.selection.ids()) {
       const el = this.scene.get(id);
@@ -601,6 +651,7 @@ export class ToolManager {
         ...(patch.textAlign === undefined ? {} : { textAlign: patch.textAlign }),
       });
     }
+    this.cb.onGestureEnd(true);
   }
 
   getTextStyle(): Readonly<{ fontSize: number; fontFamily: FontFamily; textAlign: TextAlign }> {
@@ -946,11 +997,17 @@ export class ToolManager {
     const ids = [...this.selection.ids()];
     if (ids.length === 0) return 0;
 
+    /* Deleting forty elements is one action, so it is one entry. Without this
+       the implicit per-change batching gives forty entries and undo removes them
+       one at a time — technically correct and unusable. */
+    this.cb.onGestureStart('delete');
+
     let removed = 0;
     for (const id of ids) if (this.scene.remove(id)) removed++;
 
     this.selection.clear();
     this.cb.onSelectionChange();
+    this.cb.onGestureEnd(true);
     return removed;
   }
 

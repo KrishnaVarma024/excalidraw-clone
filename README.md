@@ -21,36 +21,51 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 7 of 11 — text.** The first element whose size this codebase does not decide. A rectangle is
-200 wide because something set `width = 200`; how wide `"Hello"` is depends on the font file, the
-size, the platform's rasteriser and whether a webfont has finished loading. The browser is the only
-source of truth.
+**Phase 8 of 11 — undo, redo and persistence.** Two features with one shared idea: **the element
+model was already the right shape for both, because of a rule set in Phase 2.**
 
-Computing it on demand would put a `measureText` call — and therefore a canvas — behind
-`getGeometryBounds`, inside a cull that runs 60 times a second, in a layer that unit-tests in Node
-in nine seconds. So **measurement is an input, not a computation**: a `TextMeasurer` is passed in,
-and the result is cached on the element.
+`Scene.mutate` never edits an element in place — it builds a new object and bumps `version`. So a
+history entry can hold *references* to the old and new objects rather than copies. A 400-point
+freehand stroke dragged for three seconds produces about 180 objects; history keeps exactly two of
+them and the other 178 are collected. Structural sharing with no copy-on-write machinery.
 
-| | |
-|---|---|
-| in the browser | a measurer backed by an offscreen 2D context, with a cache |
-| in tests | a deterministic stand-in — every character `0.5 × fontSize` wide |
+The rule that makes an entry a gesture rather than a frame is **first `before`, last `after`**. Get
+it wrong and reversing one drag takes 180 undos, which users report as "undo doesn't work".
 
-The editing caret is a real `<textarea>` transformed onto the canvas — which is what makes IME,
-spellcheck, the mobile keyboard and screen readers work at all. Measured: the glyphs it draws and
-the glyphs the canvas draws land in **the same pixels**, at 100% and at 271% zoom.
+### What autosave costs during a drag
 
-Two measurements changed what got written:
+50,000 elements, one shape dragged in a 150-step circle. Identical build, one line changed:
 
-- I claimed sizing the textarea with a CSS transform avoided drift that multiplying the font size
-  would cause. A/B'd both builds from 100% to 3000% zoom: **pixel-identical at every level.** The
-  comment now says so, and gives the reason that survives measurement — the element needs a
-  transform for its rotation anyway.
-- Chrome and Firefox let a user set a **minimum font size**, and silently raise anything smaller. At
-  a 24px minimum the editor's text was 20% larger than the canvas's and wrapped in the wrong places,
-  at every zoom, with nothing thrown and nothing logged. The overlay now divides that inflation back
-  out of its transform: **138.5×18 against the canvas's 138.5×18**, where before the fix it was
-  90×31.5.
+| | debounced + idle | saved on every change | |
+|---|---:|---:|---:|
+| frame **p50** | **5.10 ms** | 123.10 ms | **24×** |
+| frame **p95** | **7.10 ms** | 165.20 ms | 23× |
+| wall clock, one drag | **7.5 s** | 28.2 s | 3.8× |
+
+The save itself is not cheap and is not made cheap — it is moved. Serialising the document is
+~300 ms at 50,000 elements, and `requestIdleCallback` puts that in the gap *after* the gesture
+instead of inside it.
+
+### Why not localStorage
+
+Measured on this project's own generated scenes:
+
+| elements | document | `JSON.stringify` | `structuredClone` |
+|---:|---:|---:|---:|
+| 1,000 | 0.50 MB | 3.2 ms | 3.8 ms |
+| 10,000 | 4.94 MB | 34.7 ms | 44.2 ms |
+| 50,000 | **24.69 MB** | 492.9 ms | 389.0 ms |
+
+localStorage's quota is about 5 MB, so a document outgrows it around **ten thousand elements** —
+and it fails by throwing on write, at the moment the user has done the most work. It is also
+synchronous. Note the last column too: storing the object graph in IndexedDB instead of a JSON
+string does not escape the serialisation cost, because the structured clone happens on the calling
+thread.
+
+A bug the browser test found and no unit test could have: **a pan or zoom scheduled no save.** The
+viewport is part of the saved document, but the only thing calling `scheduleSave` was the scene
+change feed — which fires when an *element* changes. Reopening a document dropped you back at 100%
+at the origin unless you happened to edit something afterwards.
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -65,7 +80,7 @@ Two measurements changed what got written:
 | 5 | Dirty-rectangle renderer | ✅ |
 | 6 | Move, resize, rotate, multi-select | ✅ |
 | 7 | Text | ✅ |
-| 8 | Undo/redo, persistence | — |
+| 8 | Undo/redo, persistence | ✅ |
 | 9 | PNG and SVG export | — |
 | 10 | Hardening, benchmarks in CI, deploy | — |
 
@@ -161,6 +176,9 @@ pessimisation in the common path."* It then caught exactly that.
 | Selection-overlay cost per frame, zoomed out at 50k | **84.9 ms → 0.10 ms** |
 | Text editor vs canvas glyph position, at 100% and 271% zoom | **0.0 px** |
 | …under a 24px browser minimum font size, before → after | **90×31.5 → 138.5×18** (canvas: 138.5×18) |
+| Frame p50 while dragging at 50k, autosave debounced vs eager | **5.10 ms vs 123.10 ms** (24×) |
+| Undo entries produced by a 180-mutation drag | **1** |
+| Document size at 50k elements | **24.69 MB** — past localStorage's quota by ~5× |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -223,10 +241,12 @@ src/
     input/         pointer, wheel and keyboard → tool or viewport
     dev/           the seeded scene generator — load-bearing for Phases 4 and 5
     text/          measurement and line breaking. takes a measurer, owns no canvas.
+    history/       undo/redo. holds element references, never copies.
+    persist/       the document format, and the IndexedDB store behind it.
     spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      443 tests, all in Node. ~9s, no jsdom.
+tests/engine/      484 tests, all in Node. ~9s, no jsdom.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 

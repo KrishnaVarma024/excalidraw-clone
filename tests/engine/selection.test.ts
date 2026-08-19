@@ -202,6 +202,8 @@ describe('the selection tool', () => {
       onCommit: vi.fn(),
       onToolChange: vi.fn(),
       onEditText: vi.fn(),
+      onGestureStart: vi.fn(),
+      onGestureEnd: vi.fn(),
     }, createFixedMeasurer());
     tools.setTool('selection');
   });
@@ -608,6 +610,8 @@ describe('the selection tool', () => {
           onCommit: vi.fn(),
           onToolChange: vi.fn(),
           onEditText,
+          onGestureStart: vi.fn(),
+          onGestureEnd: vi.fn(),
         },
         createFixedMeasurer(0.5),
       );
@@ -730,6 +734,8 @@ describe('the selection tool', () => {
           onCommit: vi.fn(),
           onToolChange: vi.fn(),
           onEditText: vi.fn(),
+          onGestureStart: vi.fn(),
+          onGestureEnd: vi.fn(),
         },
         createFixedMeasurer(0.9),
       );

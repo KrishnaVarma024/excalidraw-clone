@@ -135,11 +135,39 @@ export function CanvasHost({ onEngineReady }: Props) {
     void document.fonts?.ready.then(remeasure);
     document.fonts?.addEventListener('loadingdone', remeasure);
 
+    /* ── the document ──────────────────────────────────────────────────────
+       Opened after `start()` so the canvas is already painting: a slow IndexedDB
+       open would otherwise leave a blank screen with no grid and no explanation.
+       The load lands a frame or two later and forces a full repaint. */
     engine.start();
     onEngineReady(engine);
 
+    void engine.openDocument().then(({ loaded, dropped, error }) => {
+      if (error !== null) console.warn(`[document] ${error}`);
+      else if (dropped > 0) console.warn(`[document] restored ${loaded}, dropped ${dropped}`);
+    });
+
+    /* `pagehide` and `visibilitychange`, and both are needed.
+
+       The debounce means the last 1.2 seconds of work is still in memory when a
+       tab closes — which is exactly when a user closes a tab, because they have
+       just finished. `pagehide` rather than `beforeunload`: on mobile a tab is
+       far more often *discarded* than closed, and `beforeunload` does not fire
+       for that. `visibilitychange` catches switching apps, which on iOS is the
+       last event you are guaranteed to get. */
+    const flush = () => {
+      void engine.flushDocument();
+    };
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onHidden);
+
     return () => {
       unsubscribe();
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onHidden);
       prefersDark.removeEventListener('change', onThemeChange);
       document.fonts?.removeEventListener('loadingdone', remeasure);
       dprQuery?.removeEventListener('change', onDprChange);

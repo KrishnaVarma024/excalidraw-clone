@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { Engine } from '@engine/Engine';
 import { CanvasHost } from './CanvasHost';
 import { DevPanel } from './DevPanel';
+import { HistoryControls } from './HistoryControls';
 import { TextEditor } from './TextEditor';
 import { SelectionBar } from './SelectionBar';
 import { StatsOverlay } from './StatsOverlay';
@@ -29,27 +30,22 @@ export function App() {
           <StatsOverlay engine={engine} />
           <DevPanel engine={engine} />
           <SelectionBar engine={engine} />
+          <HistoryControls engine={engine} />
           <TextEditor engine={engine} />
         </>
       )}
 
       <div className="badge">
-        <strong>Phase 7 — text.</strong>
+        <strong>Phase 8 — undo, redo and persistence.</strong>
         <br />
-        Press <em>T</em> and click, then type. This is the first element whose
-        size this codebase does not decide — the browser does, via{' '}
-        <em>measureText</em> — so the measurement is passed in and the result is
-        cached on the element. That is what keeps the engine unit-testable in Node
-        with no canvas at all.
+        Draw something, drag it for three seconds, then press <em>⌘Z</em> once.
+        One gesture is one undo step, not one per frame — a three-second drag is
+        about 180 mutations and exactly one entry.
         <br />
-        The caret is a real <em>&lt;textarea&gt;</em> lined up on top of the
-        canvas. Not a shortcut: it is what makes IME, spellcheck, the mobile
-        keyboard and every screen reader work. Type, then press Escape — the
-        glyphs land in exactly the same pixels, at any zoom.
-        <br />
-        Drag a <em>side</em> handle to wrap the text; drag a <em>corner</em> to
-        scale the type. Text has a width but not a height — the height is however
-        many lines it wrapped to.
+        Reload the page. It is still there: the document autosaves to IndexedDB
+        after 1.2&nbsp;s of quiet, and flushes when the tab hides. Not
+        localStorage — a 50,000-element document is <em>24.7&nbsp;MB</em>, and the
+        quota is about five.
       </div>
     </div>
   );
