@@ -34,6 +34,7 @@
  */
 
 import type { Point } from '../util/geometry';
+import type { FontFamily, TextAlign } from '../text/measure';
 
 export type ElementId = string;
 
@@ -44,7 +45,8 @@ export type ElementType =
   | 'ellipse'
   | 'line'
   | 'arrow'
-  | 'freedraw';
+  | 'freedraw'
+  | 'text';
 
 export type FillStyle = 'solid' | 'hachure' | 'cross-hatch';
 export type StrokeStyle = 'solid' | 'dashed' | 'dotted';
@@ -177,12 +179,67 @@ export interface FreedrawElement extends ElementBase {
   simulatePressure: boolean;
 }
 
+/**
+ * Text.
+ *
+ * ── The one element whose size is not an input ─────────────────────────────
+ *
+ * Every other variant here is told how big it is. Text is *asked*: the browser
+ * decides how wide a string is, and `width`, `height`, `lines` and `ascent`
+ * below are all **derived data, cached on the element**.
+ *
+ * That is a deliberate and slightly uncomfortable choice, so the reasoning is
+ * here rather than in a commit message:
+ *
+ *   - Computing them on demand would mean `getGeometryBounds` needs a canvas,
+ *     which puts a DOM dependency into the layer that unit-tests in Node in nine
+ *     seconds. `tests/engine/boundary.test.ts` exists to prevent exactly that
+ *     kind of drift.
+ *   - The spatial index (Phase 4a) stores bounds at insert time and the
+ *     dirty-rect tracker (Phase 5) memoises them per object. Both already assume
+ *     bounds are cheap to read. A `measureText` behind `el.width` would be a
+ *     synchronous shaping call inside the cull.
+ *
+ * The cost is staleness, and the discipline that pays for it is: **every write
+ * to `text`, `fontSize`, `fontFamily` or `wrapWidth` must go through
+ * `relayoutText`, in the same `Scene.mutate` call.** Miss one and the element
+ * renders at the wrong size until something else touches it. `Scene.mutate`
+ * already enforces "one mutator, always a new object"; this is that rule
+ * carrying one more invariant.
+ */
+export interface TextElement extends ElementBase {
+  readonly type: 'text';
+  /** The raw string, with real newlines. What the editing textarea holds. */
+  text: string;
+  fontSize: number;
+  fontFamily: FontFamily;
+  textAlign: TextAlign;
+  /**
+   * `null` = auto-width: the box grows with the text and only explicit newlines
+   * break. A number = wrap at that width, and the box grows downwards instead.
+   *
+   * Null rather than `Infinity` because these are two different behaviours, not
+   * one behaviour with an extreme parameter — and because `Infinity` survives
+   * arithmetic silently until something multiplies it.
+   */
+  wrapWidth: number | null;
+
+  /* ── derived, cached — see the note above ──────────────────────────────── */
+
+  /** The wrapped display lines. `text` split by `wrapText`. */
+  lines: readonly string[];
+  /** Baseline of the first line, from the top of the box. */
+  ascent: number;
+  lineHeight: number;
+}
+
 export type Element =
   | RectangleElement
   | DiamondElement
   | EllipseElement
   | LinearElement
-  | FreedrawElement;
+  | FreedrawElement
+  | TextElement;
 
 /** Elements whose geometry is a point list rather than a box. */
 export type PointBasedElement = LinearElement | FreedrawElement;
@@ -195,6 +252,12 @@ export function isFilled(el: Element): boolean {
   // Freehand strokes are always filled outlines; the "background" concept does
   // not apply to them. See drawElement.ts.
   if (el.type === 'freedraw') return true;
+  /* Text is hit as a solid box even though the glyphs are mostly whitespace.
+     Per-glyph hit testing is possible and it is the wrong answer: clicking the
+     hole in an 'o' would miss, and clicking the space between two words would
+     miss, so text would feel broken in a way users could never describe. Every
+     editor treats a text run as a rectangle. */
+  if (el.type === 'text') return true;
   return el.backgroundColor !== TRANSPARENT;
 }
 

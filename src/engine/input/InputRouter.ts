@@ -94,6 +94,16 @@ export interface InputDelegate {
   onPointerHover(info: PointerInfo): void;
   onPointerUp(info: PointerInfo): void;
   onCancel(): void;
+  /**
+   * A double click. Return true if consumed.
+   *
+   * A separate channel rather than counting `PointerEvent.detail` in the tool.
+   * The browser already knows what a double click is — it accounts for the
+   * platform's interval, the movement slop between the two clicks, and the OS
+   * accessibility setting that changes both. Reimplementing that with a
+   * timestamp comparison gets it wrong for the users who most need it right.
+   */
+  onDoubleClick(info: PointerInfo): boolean;
   /** Unhandled keydown, for tool shortcuts. Return true if consumed. */
   onKeyDown(e: KeyboardEvent): boolean;
 }
@@ -139,6 +149,7 @@ export class InputRouter {
     const el = target;
 
     el.addEventListener('pointerdown', this.onPointerDown, { signal });
+    el.addEventListener('dblclick', this.onDoubleClick, { signal });
     el.addEventListener('pointermove', this.onPointerMove, { signal });
     el.addEventListener('pointerup', this.onPointerUp, { signal });
     el.addEventListener('pointercancel', this.onPointerUp, { signal });
@@ -198,6 +209,12 @@ export class InputRouter {
       this.beginGesture('tool', e);
     }
     // 3. Otherwise the event falls through unclaimed.
+  };
+
+  private onDoubleClick = (e: MouseEvent): void => {
+    /* `dblclick` arrives after the second `pointerup`, so any gesture the second
+       click started has already ended. Nothing to cancel; just ask the tool. */
+    if (this.delegate.onDoubleClick(this.info(e))) e.preventDefault();
   };
 
   private onPointerMove = (e: PointerEvent): void => {
@@ -365,15 +382,23 @@ export class InputRouter {
     return { x: e.clientX - this.rect.left, y: e.clientY - this.rect.top };
   }
 
-  private info(e: PointerEvent): PointerInfo {
+  /**
+   * `MouseEvent` as well as `PointerEvent`, because `dblclick` is a MouseEvent.
+   *
+   * The two fields a mouse event lacks get the values a mouse would report
+   * anyway — a constant 0.5 pressure and `'mouse'` — rather than being made
+   * optional. Optional fields here would push a `?? 0.5` into every consumer,
+   * and one of them would eventually forget.
+   */
+  private info(e: PointerEvent | MouseEvent): PointerInfo {
     const screen = this.toCanvas(e);
     return {
       screen,
       scene: this.viewport.toScene(screen),
       shiftKey: e.shiftKey,
       altKey: e.altKey,
-      pressure: e.pressure,
-      pointerType: e.pointerType,
+      pressure: 'pressure' in e ? e.pressure : 0.5,
+      pointerType: 'pointerType' in e ? e.pointerType : 'mouse',
     };
   }
 

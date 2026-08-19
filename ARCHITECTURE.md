@@ -873,6 +873,146 @@ A handle that scaled with the document is a speck at 10% and covers the shape at
 applies to the cursor: the handle called `nw` on a shape rotated a quarter turn is visually in the
 top-*right*, so the resize cursor is derived from the handle direction **plus** the element's angle.
 
+### 7.4 Text — the element this codebase does not own the geometry of
+
+Every variant up to `TextElement` is *told* how big it is. Text is *asked*. How wide `"Hello"` is
+depends on the font file, the size, the platform's rasteriser and hinting, and whether a webfont has
+finished loading. There is no computing it from first principles; the browser is the only source of
+truth, via `CanvasRenderingContext2D.measureText`.
+
+#### 7.4.1 Measurement is an input, not a computation
+
+Nothing under `src/engine/scene/` calls `measureText`. A `TextMeasurer` is passed in wherever a
+measurement is needed, and the element **stores** the result — its wrapped `lines`, `width`,
+`height`, `ascent`, `lineHeight`.
+
+Two reasons, and the second matters more:
+
+1. **`getGeometryBounds` must not need a canvas.** The whole `src/engine/` layer unit-tests in Node
+   in about nine seconds with no jsdom, and §5.4's index stores bounds at insert time while §6's
+   dirty tracker memoises them per object — both already assume bounds are cheap to read. A
+   synchronous shaping call behind `el.width` would sit inside the cull.
+2. **It makes the staleness explicit.** Cached measurements go stale: when the font size changes,
+   when the family changes, and — the awkward one — when a webfont finishes loading *after* the text
+   was laid out. Storing the measurement forces you to name every one of those moments. Computing it
+   on demand hides them, right up until the text jumps half a second after the page loads.
+
+The discipline that pays for it: **every write to `text`, `fontSize`, `fontFamily` or `wrapWidth`
+goes through `relayoutText`, in the same `Scene.mutate` call.** That is §3.2's "one mutator, always a
+new object" carrying one more invariant.
+
+`relayoutText` reuses the previous `lines` array when the contents come out identical. `Scene.mutate`
+compares per key with `Object.is`, so a freshly allocated array of the same strings reads as a
+change — and `remeasureText()` runs over *every* text element on `document.fonts.ready`. Without the
+reuse, one font event bumps `version` on all of them, invalidating the Rough cache and the memoised
+bounds and forcing a full repaint, from a code path whose only job is to check whether anything
+moved.
+
+#### 7.4.2 Line breaking is greedy, and that is a decision
+
+Fill each line until the next word does not fit, then break: O(words), one measurement per word.
+
+The alternative is **Knuth–Plass**, TeX's algorithm, which treats the paragraph as one optimisation
+and minimises total squared badness by dynamic programming, so a slightly worse early line can buy a
+much better later one. Visibly better rag; O(n²) in the general case with a far larger constant.
+
+Greedy wins here for a reason unrelated to complexity: **this wraps on every keystroke.**
+Paragraph-optimal breaking means the line *above* the one you are typing on can re-break as you
+type, and text reflowing behind the cursor is disorienting in a way slightly worse rag never is.
+Word processors that do use Knuth–Plass mostly apply it at render time, not during editing.
+
+The case that is easy to miss: a single word longer than the wrap width. Greedy word wrap gives it a
+line of its own and moves on, and it still overflows the box, silently, over whatever is beside it.
+One pasted URL breaks the layout with no error anywhere. So an over-long word is broken by **code
+point** — not by UTF-16 unit, or an emoji comes out as two replacement glyphs.
+
+Two different width rules, and conflating them makes the box creep:
+
+| | width of the block |
+|---|---|
+| auto-width (`wrapWidth === null`) | the widest line |
+| wrapped | the wrap width itself |
+
+Measure a wrapped block by its widest line and deleting a long word shrinks the box, which changes
+the wrap width the next keystroke is measured against, so retyping the word does not restore the
+original layout.
+
+#### 7.4.3 Editing is a real `<textarea>`, not a drawn caret
+
+The list of things a hand-rolled caret would have to reimplement is not a list of features, it is a
+list of ways to exclude people:
+
+- **IME.** Typing Japanese, Chinese or Korean goes through an input method editor; composition state
+  lives *inside* the input element and is only observable through `compositionstart`/`update`/`end`.
+  A canvas caret cannot host a composition — and it looks fine in every test written by someone who
+  types Latin.
+- **Accessibility.** A screen reader can read a focused textarea. It cannot read pixels. Nor can
+  dictation software, switch access or a braille display.
+- **The mobile keyboard.** It appears because a form control has focus. Focus *is* the API.
+- **Everything the platform already did.** Word-wise motion, double-click-to-select-word, undo
+  *inside* the field, spellcheck, autocorrect, drag-and-drop of text, OS text replacements.
+
+Excalidraw, tldraw and Figma all pay the alignment cost. Google Docs famously does not, and what
+buys it that freedom is a document model and a test matrix this project does not have.
+
+Two rules make it line up:
+
+- **The element is hidden from the static layer while its editor is open** (`Renderer.setHidden`).
+  Painting it as well as showing the textarea gives two copies a fraction of a pixel apart, which
+  does not read as "drawn twice" — it reads as *blurry*, and gets filed as a font-rendering bug.
+- **The textarea carries a scene-unit font size and a CSS transform does the zoom.** Measured
+  against the canvas: 0.0 px apart at 100% and at 271%.
+
+An honest correction, because the first version of this section claimed otherwise. I expected the
+alternative — `fontSize × zoom` in screen pixels — to drift as browsers quantised font sizes, and
+A/B'd the two builds from 100% to 3000%. **Pixel-identical at every level.** The reason that survives
+measurement is duller: the element needs a transform for its rotation anyway, so scaling keeps one
+affine map in one place instead of splitting it across two.
+
+#### 7.4.4 The accessibility setting that breaks the overlay
+
+Chrome and Firefox both let a user set a **minimum font size**, and it is not a suggestion — the
+browser silently raises anything smaller. Ask for 20px under a 24px minimum and `getComputedStyle`
+reports 24px, with nothing thrown and nothing logged. The editor's glyphs are then 20% larger than
+the canvas's, at every zoom, and wrap in the wrong places. The only symptom is text that visibly
+resizes the moment you stop editing.
+
+It fails for exactly the users least able to work around it, and it never shows up in development,
+because a developer's browser has the minimum at its default of zero.
+
+The correction: read the size the browser actually used and divide the inflation back out of the
+transform. Rendered size is `used × scale`, so `scale = zoom / inflation` renders at `asked × zoom`.
+Everything else set in element-local pixels is **multiplied** by the same ratio — local lengths are
+about to be shrunk by the transform, so they must start proportionally larger. (Getting that
+backwards makes the editor wrap at 1/1.44 of the right width, and the symptom looks like a wrapping
+bug rather than a scaling one.)
+
+Measured with a 24px minimum, editor against canvas:
+
+| | before | after |
+|---|---|---|
+| editor block | 90 × 31.5 | **138.5 × 18** |
+| canvas block | 138.5 × 18 | 138.5 × 18 |
+
+`getComputedStyle` forces a style recalculation, so it is read only when the requested size changes,
+not on every frame.
+
+#### 7.4.5 Resize means something different for text
+
+Height is *derived* — however many lines the content wraps to, times the line height. So the eight
+handles cannot all mean what they mean for a rectangle; accepting a height would leave an element
+whose stored box disagrees with its content, which the spatial index and the dirty tracker both
+believe.
+
+| handle | what it does | why |
+|---|---|---|
+| corner | scales the **font** | "make this bigger" means bigger type, not 20px type stretched into a taller box |
+| e / w | sets the **wrap width** and reflows | also how an auto-width run becomes a wrapped paragraph — no mode switch, you just drag a side |
+| n / s | nothing | there is no height to set; accepting the drag and springing back on the next keystroke is worse |
+
+The corner scale factor comes from the *width* even though a corner drag moves both axes, because
+the height the pointer implies is not a height the element can adopt.
+
 ---
 
 ## 8. History (undo / redo)

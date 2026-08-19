@@ -116,12 +116,32 @@ export function CanvasHost({ onEngineReady }: Props) {
       setCursor(snap.cursor);
     });
 
+    /* ── fonts ─────────────────────────────────────────────────────────────
+       The nastiest staleness bug in this phase, and it is silent.
+
+       Text is measured when it changes and the result is cached on the element.
+       If a webfont is still loading at that moment, `ctx.font` falls back to a
+       different family with different metrics — no error, no warning — and every
+       string is laid out against the wrong face. `document.fonts.ready` resolves
+       once the initial set has settled; `loadingdone` fires for any that arrive
+       later, which is what happens when a font is only requested once a glyph
+       needing it is drawn.
+
+       Re-measuring when nothing changed is free: `Scene.mutate` reports no
+       change and the engine does not repaint. */
+    const remeasure = () => {
+      engine.remeasureText();
+    };
+    void document.fonts?.ready.then(remeasure);
+    document.fonts?.addEventListener('loadingdone', remeasure);
+
     engine.start();
     onEngineReady(engine);
 
     return () => {
       unsubscribe();
       prefersDark.removeEventListener('change', onThemeChange);
+      document.fonts?.removeEventListener('loadingdone', remeasure);
       dprQuery?.removeEventListener('change', onDprChange);
       ro.disconnect();
       engine.destroy();

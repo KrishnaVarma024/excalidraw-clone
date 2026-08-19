@@ -21,29 +21,36 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 6 of 11 — move, resize, rotate, multi-select.** Where Phase 5's dirty rectangles get
-spent. Drawing a new shape never touched the static layer — the draft lives on the interactive
-canvas. Dragging a *committed* element mutates the scene on every frame, so it does.
+**Phase 7 of 11 — text.** The first element whose size this codebase does not decide. A rectangle is
+200 wide because something set `width = 200`; how wide `"Hello"` is depends on the font file, the
+size, the platform's rasteriser and whether a webfont has finished loading. The browser is the only
+source of truth.
 
-Same 50,000-element scene, same 120-step circular drag of one shape, one line changed to force a
-full repaint for the comparison:
+Computing it on demand would put a `measureText` call — and therefore a canvas — behind
+`getGeometryBounds`, inside a cull that runs 60 times a second, in a layer that unit-tests in Node
+in nine seconds. So **measurement is an input, not a computation**: a `TextMeasurer` is passed in,
+and the result is cached on the element.
 
-| | full repaint | dirty rects | |
-|---|---:|---:|---:|
-| frame **p50** | 858.70 ms | **7.70 ms** | **112×** |
-| frame **p95** | 1236.10 ms | **21.20 ms** | 58× |
-| elements redrawn per frame | 49,819 | **7** | |
-| screen repainted | 100% | **< 0.1%** | |
-| wall clock, one drag | 122.8 s | **8.3 s** | 15× |
+| | |
+|---|---|
+| in the browser | a measurer backed by an offscreen 2D context, with a cache |
+| in tests | a deterministic stand-in — every character `0.5 × fontSize` wide |
 
-Phase 5 measured 13× on p95 and called the rest *"banked, not spent"*. This is the withdrawal.
+The editing caret is a real `<textarea>` transformed onto the canvas — which is what makes IME,
+spellcheck, the mobile keyboard and screen readers work at all. Measured: the glyphs it draws and
+the glyphs the canvas draws land in **the same pixels**, at 100% and at 271% zoom.
 
-The phase also found a bug that had been shipping since Phase 4b. The selection overlay asked the
-spatial index for every element in the viewport and filtered that down to the selection — correct,
-and backwards. It costs O(elements on screen) to produce a result capped at 200. Zoomed out over
-50,000 elements it was **84.9 ms per frame**, sitting next to a cull and a draw that had both been
-optimised to 0.00 ms. Iterating the selection instead: **0.10 ms**. Nothing before this phase could
-hold a gesture open long enough for it to show up.
+Two measurements changed what got written:
+
+- I claimed sizing the textarea with a CSS transform avoided drift that multiplying the font size
+  would cause. A/B'd both builds from 100% to 3000% zoom: **pixel-identical at every level.** The
+  comment now says so, and gives the reason that survives measurement — the element needs a
+  transform for its rotation anyway.
+- Chrome and Firefox let a user set a **minimum font size**, and silently raise anything smaller. At
+  a 24px minimum the editor's text was 20% larger than the canvas's and wrapped in the wrong places,
+  at every zoom, with nothing thrown and nothing logged. The overlay now divides that inflation back
+  out of its transform: **138.5×18 against the canvas's 138.5×18**, where before the fix it was
+  90×31.5.
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -57,7 +64,7 @@ hold a gesture open long enough for it to show up.
 | 4b | Hit detection and selection | ✅ |
 | 5 | Dirty-rectangle renderer | ✅ |
 | 6 | Move, resize, rotate, multi-select | ✅ |
-| 7 | Text | — |
+| 7 | Text | ✅ |
 | 8 | Undo/redo, persistence | — |
 | 9 | PNG and SVG export | — |
 | 10 | Hardening, benchmarks in CI, deploy | — |
@@ -152,6 +159,8 @@ pessimisation in the common path."* It then caught exactly that.
 | Frame p50 while dragging one shape at 50k | **858.7 ms → 7.7 ms** (112×) |
 | Elements redrawn per frame during that drag | **49,819 → 7** |
 | Selection-overlay cost per frame, zoomed out at 50k | **84.9 ms → 0.10 ms** |
+| Text editor vs canvas glyph position, at 100% and 271% zoom | **0.0 px** |
+| …under a 24px browser minimum font size, before → after | **90×31.5 → 138.5×18** (canvas: 138.5×18) |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -213,10 +222,11 @@ src/
     tools/         the drawing state machine
     input/         pointer, wheel and keyboard → tool or viewport
     dev/           the seeded scene generator — load-bearing for Phases 4 and 5
+    text/          measurement and line breaking. takes a measurer, owns no canvas.
     spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      402 tests, all in Node. ~9s, no jsdom.
+tests/engine/      443 tests, all in Node. ~9s, no jsdom.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 

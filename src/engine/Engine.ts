@@ -45,9 +45,17 @@ import { InputRouter, type InputDelegate, type PointerInfo } from './input/Input
 import { Viewport } from './viewport/Viewport';
 import { Scene, type HitStats } from './scene/Scene';
 import { getRenderBounds, getSceneBounds } from './scene/bounds';
-import { DEFAULT_STYLE, type Element, type ElementStyle } from './scene/element.types';
+import { DEFAULT_STYLE, type Element, type ElementId, type ElementStyle } from './scene/element.types';
 import { TOOL_SHORTCUTS, ToolManager, type ToolType } from './tools/ToolManager';
 import { Selection } from './tools/Selection';
+import {
+  DEFAULT_FONT_FAMILY,
+  DEFAULT_FONT_SIZE,
+  createCanvasMeasurer,
+  type FontFamily,
+  type TextAlign,
+  type TextMeasurer,
+} from './text/measure';
 import {
   FrameTimer,
   type FrameStats,
@@ -83,6 +91,43 @@ export interface EngineSnapshot {
    * snapshot at all.
    */
   readonly cursor: string | null;
+  /**
+   * The text element being edited, or null.
+   *
+   * Discrete — it changes when an editor opens or closes, which is a handful of
+   * times per session. *Where* that editor sits on screen is continuous and does
+   * not belong here; see `Engine.textEditorLayout`.
+   */
+  readonly editingTextId: ElementId | null;
+  /** Font settings for new text, and for the current text selection. */
+  readonly textStyle: Readonly<{ fontSize: number; fontFamily: FontFamily; textAlign: TextAlign }>;
+  /** Whether the selection contains at least one text element. */
+  readonly hasText: boolean;
+}
+
+/**
+ * Everything the editing `<textarea>` needs to sit exactly on top of the text.
+ *
+ * Screen coordinates and a zoom factor rather than pre-multiplied pixel sizes —
+ * see `Engine.textEditorLayout` for why that distinction matters at fractional
+ * zoom.
+ */
+export interface TextEditorLayout {
+  readonly id: ElementId;
+  readonly text: string;
+  /** Top-left of the text box, in screen pixels. */
+  readonly left: number;
+  readonly top: number;
+  /** Box width in SCENE units. Scaled by `zoom` via a CSS transform. */
+  readonly width: number;
+  /** Font size in SCENE units, likewise scaled rather than multiplied. */
+  readonly fontSize: number;
+  readonly fontFamily: FontFamily;
+  readonly lineHeight: number;
+  readonly textAlign: TextAlign;
+  readonly color: string;
+  readonly zoom: number;
+  readonly angle: number;
 }
 
 /** Per-frame numbers. Delivered outside React. */
@@ -224,10 +269,26 @@ export class Engine {
     perfMarks: false,
     selectedCount: 0,
     cursor: null,
+    editingTextId: null,
+    textStyle: { fontSize: DEFAULT_FONT_SIZE, fontFamily: DEFAULT_FONT_FAMILY, textAlign: 'left' },
+    hasText: false,
   };
 
   private panAffordance = false;
   private lastFrameEmit = 0;
+
+  /**
+   * The browser, wrapped.
+   *
+   * Created here because this is the one class that is allowed to know it is in
+   * a browser — it already takes two `HTMLCanvasElement`s. Everything below it
+   * receives a `TextMeasurer` and cannot tell the difference between this and
+   * the deterministic one the tests use.
+   */
+  private readonly measurer: TextMeasurer = createCanvasMeasurer();
+
+  /** The text element whose editor is open. Hidden from the static layer. */
+  private editingText: ElementId | null = null;
 
   constructor(
     private readonly staticCanvas: HTMLCanvasElement,
@@ -252,14 +313,35 @@ export class Engine {
       onSelectionChange: () => {
         this.needsInteractiveRender = true;
         this.selectionBoundsDirty = true;
+      this.hasTextDirty = true;
         this.refreshSnapshot();
       },
       onCommit: () => {
         this.needsStaticRender = true;
         this.refreshSnapshot();
       },
-      onToolChange: () => this.refreshSnapshot(),
-    });
+      onToolChange: () => {
+        /* Leaving the selection tool closes any open editor. The alternative —
+           a textarea still focused while the rectangle tool is active — means
+           the next keystroke goes into the text instead of switching tools, and
+           the user has no way to tell why. */
+        if (this.tools.editingId !== null) this.tools.endTextEdit();
+        this.refreshSnapshot();
+      },
+      onEditText: (id) => {
+        this.editingText = id;
+        this.renderer.setHidden(id);
+        /* Force a full repaint on both edges of editing. The element is hidden
+           from the static layer while its editor is open (otherwise you see the
+           text twice — once painted, once in the textarea, a pixel apart and
+           subtly different), so both opening and closing change what should be
+           on screen in a way no dirty rectangle was collected for. */
+        this.dirty.force('global');
+        this.needsStaticRender = true;
+        this.needsInteractiveRender = true;
+        this.refreshSnapshot();
+      },
+    }, this.measurer);
 
     // Any scene change dirties the static layer. In Phase 5 this callback grows
     // teeth: `change.before` and `change.after` become the dirty rectangles, and
@@ -281,6 +363,7 @@ export class Engine {
 
       // A moved or deleted element changes where the selection outline goes.
       this.selectionBoundsDirty = true;
+      this.hasTextDirty = true;
       this.needsInteractiveRender = true;
     });
 
@@ -325,6 +408,12 @@ export class Engine {
       onPointerUp: () => {
         this.tools.onPointerUp();
       },
+      onDoubleClick: (info: PointerInfo) =>
+        this.tools.editTextAt(info.scene, {
+          ...info,
+          hitThreshold: this.hitThreshold(),
+          zoom: this.viewport.zoom,
+        }),
       onCancel: () => this.tools.cancel(),
       onKeyDown: (e: KeyboardEvent) => {
         // Selection commands first: they are modal, and a bare `a` must select
@@ -667,6 +756,9 @@ export class Engine {
       perfMarks: this.stages.isMarking,
       selectedCount: this.selection.size,
       cursor: this.tools.cursor,
+      editingTextId: this.editingText,
+      textStyle: this.tools.getTextStyle(),
+      hasText: this.hasTextSelected(),
     };
 
     const prev = this.snapshot;
@@ -683,13 +775,137 @@ export class Engine {
       /* Phase 5's lesson, applied without having to relearn it: a field added to
          the snapshot and not to this comparison is a field React never observes
          changing. The perfMarks checkbox shipped dead for exactly one build. */
-      prev.cursor === next.cursor
+      prev.cursor === next.cursor &&
+      prev.editingTextId === next.editingTextId &&
+      prev.textStyle === next.textStyle &&
+      prev.hasText === next.hasText
     ) {
       return; // nothing React can observe changed — do not touch the reference
     }
 
     this.snapshot = next;
     for (const l of this.listeners) l();
+  }
+
+  /* ── text editing ───────────────────────────────────────────────────────── */
+
+  /**
+   * Where to put the editing `<textarea>`, this frame.
+   *
+   * Returns SCREEN coordinates, and is therefore **continuous state**: it
+   * changes on every pan and every zoom step, which is the same reason frame
+   * timings do not go on the React snapshot. The editor component reads this
+   * through `addFrameListener` and writes it straight to a ref, so panning with
+   * an editor open costs zero React renders — the same two-channel split the
+   * stats overlay has used since Phase 3.
+   *
+   * What *is* discrete, and does go on the snapshot, is whether an editor should
+   * exist at all.
+   */
+  textEditorLayout(): TextEditorLayout | null {
+    if (this.editingText === null) return null;
+
+    const el = this.scene.get(this.editingText);
+    if (el === undefined || el.type !== 'text') return null;
+
+    const { zoom } = this.viewport;
+    const topLeft = this.viewport.toScreen({ x: el.x, y: el.y });
+
+    return {
+      id: el.id,
+      text: el.text,
+      left: topLeft.x,
+      top: topLeft.y,
+      /* Sized in SCENE units and scaled with a CSS transform, rather than sized
+         in screen pixels directly. Two reasons, and the second is the one that
+         bites: a CSS transform can carry the element's rotation for free, and
+         browsers quantise `font-size` (and snap glyphs to hinted stems), so a
+         textarea sized at `20 * zoom` px drifts out of alignment with the canvas
+         text at fractional zooms. Scaling a fixed size keeps them identical. */
+      width: el.wrapWidth ?? el.width,
+      fontSize: el.fontSize,
+      fontFamily: el.fontFamily,
+      lineHeight: el.lineHeight,
+      textAlign: el.textAlign,
+      color: el.strokeColor,
+      zoom,
+      angle: el.angle,
+    };
+  }
+
+  /**
+   * Does the selection contain any text? Drives whether the font controls show.
+   *
+   * ── Memoised, and Phase 6 is why ───────────────────────────────────────────
+   *
+   * `refreshSnapshot` calls this, and `refreshSnapshot` runs on every hover
+   * change — which is several times a second while the mouse is moving. Scanning
+   * the selection each time makes an O(selection) walk part of mouse movement,
+   * and with everything selected that is 50,000 map lookups per wiggle.
+   *
+   * That is the *exact* shape of the bug Phase 6 found in the selection overlay,
+   * one phase later and in a different function. Recognising it the second time
+   * cost nothing; not recognising it the first time cost 84.9 ms a frame.
+   *
+   * The flag is cleared by the same two events that dirty the selection bounds:
+   * the selection changed, or the scene did.
+   */
+  hasTextSelected(): boolean {
+    if (!this.hasTextDirty) return this.hasTextCache;
+
+    let found = false;
+    for (const id of this.selection.ids()) {
+      const el = this.scene.get(id);
+      if (el !== undefined && el.type === 'text' && !el.isDeleted) {
+        found = true;
+        break;
+      }
+    }
+    this.hasTextCache = found;
+    this.hasTextDirty = false;
+    return found;
+  }
+
+  private hasTextCache = false;
+  private hasTextDirty = true;
+
+  /** Called by the editor on every keystroke. */
+  setEditingText(value: string): void {
+    if (this.tools.applyTextEdit(value)) {
+      this.needsStaticRender = true;
+      this.needsInteractiveRender = true;
+      this.refreshSnapshot();
+    }
+  }
+
+  endTextEditing(): void {
+    this.tools.endTextEdit();
+  }
+
+  setTextStyle(patch: Partial<{ fontSize: number; fontFamily: FontFamily; textAlign: TextAlign }>): void {
+    this.tools.setTextStyle(patch);
+    this.needsStaticRender = true;
+    this.refreshSnapshot();
+  }
+
+  /**
+   * Re-lay-out every text element, because the fonts changed under us.
+   *
+   * Wired to `document.fonts.ready` and to `loadingdone` in `CanvasHost`. Until
+   * a webfont arrives, `ctx.font` falls back silently to a different family with
+   * different metrics — nothing throws, and every string was measured against
+   * the wrong face. The symptom is text that visibly re-flows a beat after the
+   * page loads, or, worse, does not re-flow and stays wrapped in the wrong
+   * places for the rest of the session.
+   */
+  remeasureText(): number {
+    const changed = this.tools.remeasureText();
+    if (changed > 0) {
+      this.dirty.force('global');
+      this.needsStaticRender = true;
+      this.refreshSnapshot();
+    }
+    return changed;
   }
 
   /* ── channel 2: per-frame numbers, bypassing React ──────────────────────── */

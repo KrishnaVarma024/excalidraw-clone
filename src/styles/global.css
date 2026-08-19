@@ -575,3 +575,38 @@ canvas {
   font-style: normal;
   font-weight: 600;
 }
+
+/* ── text editor ──────────────────────────────────────────────────────────────
+   A real <textarea> sitting exactly on top of the canvas text.
+
+   Every rule here is doing one of two jobs: erasing the browser's idea of what
+   a textarea looks like, or lining the glyphs up with the ones the canvas draws
+   underneath. `transform-origin: 0 0` is the load-bearing one — the scale in
+   TextEditor.tsx is applied about the top-left corner because that is the point
+   the scene coordinate refers to. Leave it at the default centre and the editor
+   drifts further from the canvas text the further you are from the origin. */
+.text-editor {
+  position: absolute;
+  transform-origin: 0 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  overflow: hidden;
+  resize: none;
+  white-space: pre-wrap;
+  /* Wrap at the same places the engine does. `break-word` here is the CSS
+     equivalent of breakWord() in wrap.ts, and the two must agree or a long URL
+     wraps in one place while being edited and another once committed. */
+  overflow-wrap: break-word;
+  word-break: normal;
+  /* The canvas already paints a caret's worth of context; a text cursor over
+     the canvas is the affordance. */
+  caret-color: currentColor;
+  z-index: 3;
+}
+
+.text-editor:focus {
+  outline: 0;
+}

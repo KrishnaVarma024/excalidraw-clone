@@ -27,6 +27,7 @@ import type { Viewport } from '../viewport/Viewport';
 import { sceneToScreenX, sceneToScreenY } from '../viewport/transform';
 import type { Bounds } from '../util/geometry';
 import type { QueryPath, Scene } from '../scene/Scene';
+import type { ElementId } from '../scene/element.types';
 import { type GridStyle, drawGrid } from './grid';
 import { createRoughCanvas, drawElement } from './drawElement';
 import { RoughCache } from './roughCache';
@@ -155,7 +156,10 @@ export class Renderer {
     stages.end('cull');
 
     stages.begin('draw');
-    for (const el of visible) drawElement(ctx, this.rough, this.cache, el);
+    for (const el of visible) {
+      if (el.id === this.hidden) continue;
+      drawElement(ctx, this.rough, this.cache, el);
+    }
     stages.end('draw');
 
     return this.finish(gridLines, visible.length, 0, 1, true);
@@ -232,7 +236,10 @@ export class Renderer {
       nodes += this.scene.queryStats.nodes;
 
       stages.begin('draw');
-      for (const el of overlapping) drawElement(ctx, this.rough, this.cache, el);
+      for (const el of overlapping) {
+        if (el.id === this.hidden) continue;
+        drawElement(ctx, this.rough, this.cache, el);
+      }
       stages.end('draw');
       drawn += overlapping.length;
 
@@ -241,6 +248,23 @@ export class Renderer {
 
     return this.finish(gridLines, drawn, rects.length, coverage, false, tested, nodes);
   }
+
+  /**
+   * An element to skip while drawing, or null.
+   *
+   * Exactly one thing uses this: the text element whose editor is open. Its
+   * glyphs are already on screen, drawn by a real `<textarea>` sitting on top of
+   * the canvas, and painting it here too gives you two copies a fraction of a
+   * pixel apart — which does not read as "drawn twice", it reads as *blurry*,
+   * and people report it as a font-rendering bug.
+   *
+   * A single id rather than a set, because there is exactly one caret.
+   */
+  setHidden(id: ElementId | null): void {
+    this.hidden = id;
+  }
+
+  private hidden: ElementId | null = null;
 
   private applySceneTransform(vp: Viewport): void {
     const m = vp.deviceMatrix();

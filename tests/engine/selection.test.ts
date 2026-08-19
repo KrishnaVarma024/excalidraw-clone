@@ -16,6 +16,7 @@ import { newRectangle } from '@engine/scene/elementFactory';
 import { DEFAULT_STYLE, TRANSPARENT, type Element } from '@engine/scene/element.types';
 import { generateScene } from '@engine/dev/generateScene';
 import { hitTestElement } from '@engine/scene/hitTest';
+import { createFixedMeasurer } from '@engine/text/measure';
 import { MIN_SIZE, ROTATE_OFFSET_PX } from '@engine/scene/transform';
 import type { Bounds, Point } from '@engine/util/geometry';
 
@@ -200,7 +201,8 @@ describe('the selection tool', () => {
       onSelectionChange,
       onCommit: vi.fn(),
       onToolChange: vi.fn(),
-    });
+      onEditText: vi.fn(),
+    }, createFixedMeasurer());
     tools.setTool('selection');
   });
 
@@ -586,6 +588,165 @@ describe('the selection tool', () => {
       tools.setTool('rectangle');
       tools.onPointerHover(at(40, 40), mods());
       expect(tools.cursor).toBeNull();
+    });
+  });
+
+  /* ── text (Phase 7) ─────────────────────────────────────────────────────── */
+
+  describe('text', () => {
+    let onEditText: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      onEditText = vi.fn();
+      tools = new ToolManager(
+        scene,
+        selection,
+        DEFAULT_STYLE,
+        {
+          onDraftChange: vi.fn(),
+          onSelectionChange,
+          onCommit: vi.fn(),
+          onToolChange: vi.fn(),
+          onEditText,
+        },
+        createFixedMeasurer(0.5),
+      );
+      tools.setTool('text');
+    });
+
+    it('creates an element and opens the editor on a click, with no drag', () => {
+      /* Text is the only tool with no drag. Requiring one before you can type is
+         defensible — it is how you would make a fixed-width paragraph — and it
+         costs you click-and-type, which is the interaction people actually use. */
+      expect(tools.onPointerDown(at(100, 100), mods())).toBe(true);
+
+      expect(scene.visibleCount).toBe(1);
+      expect(tools.editingId).not.toBeNull();
+      expect(onEditText).toHaveBeenCalledWith(tools.editingId);
+    });
+
+    it('centres the caret on the click rather than putting the box corner there', () => {
+      // Clicking and having the text appear below-right of the pointer is the
+      // kind of small wrongness that makes a tool feel cheap.
+      tools.onPointerDown(at(100, 100), mods());
+      const el = scene.sorted()[0]!;
+      expect(el.y + el.height / 2).toBeCloseTo(100, 6);
+    });
+
+    it('re-lays-out on every keystroke, so the box tracks the content', () => {
+      tools.onPointerDown(at(0, 0), mods());
+      const id = tools.editingId!;
+
+      expect(tools.applyTextEdit('hello')).toBe(true);
+      const el = scene.get(id)!;
+      expect(el.type).toBe('text');
+      if (el.type !== 'text') return;
+
+      expect(el.text).toBe('hello');
+      expect(el.lines).toEqual(['hello']);
+      expect(el.width).toBe(50); // 5 chars × 20px × 0.5
+    });
+
+    it('reports no change when the text is the same', () => {
+      // Otherwise every keystroke that does not alter the string still bumps
+      // `version`, invalidating caches and forcing a repaint for nothing.
+      tools.onPointerDown(at(0, 0), mods());
+      tools.applyTextEdit('hi');
+      expect(tools.applyTextEdit('hi')).toBe(false);
+    });
+
+    it('discards an element nobody typed into', () => {
+      /* Without this, every stray click with the text tool leaves an invisible,
+         zero-content, fully selectable element in the document — and in the
+         spatial index, and in the undo history, and in the export. */
+      tools.onPointerDown(at(0, 0), mods());
+      expect(scene.visibleCount).toBe(1);
+
+      tools.endTextEdit();
+      expect(scene.visibleCount).toBe(0);
+      expect(onEditText).toHaveBeenLastCalledWith(null);
+    });
+
+    it('keeps an element that has content', () => {
+      tools.onPointerDown(at(0, 0), mods());
+      tools.applyTextEdit('kept');
+      tools.endTextEdit();
+      expect(scene.visibleCount).toBe(1);
+    });
+
+    it('treats whitespace-only as empty', () => {
+      // A run containing one space is invisible and unselectable in practice.
+      tools.onPointerDown(at(0, 0), mods());
+      tools.applyTextEdit('   \n  ');
+      tools.endTextEdit();
+      expect(scene.visibleCount).toBe(0);
+    });
+
+    it('opens the editor on a double click, and only on text', () => {
+      tools.onPointerDown(at(0, 0), mods());
+      tools.applyTextEdit('edit me');
+      tools.endTextEdit();
+
+      tools.setTool('selection');
+      expect(tools.editTextAt(at(20, 0), mods())).toBe(true);
+
+      scene.add(box(500, 500, 9));
+      expect(tools.editTextAt(at(520, 520), mods())).toBe(false);
+    });
+
+    it('re-lays-out when only the font size changes', () => {
+      /* The subtle staleness case. The string did not change, so a naive
+         "re-wrap when the text changes" rule leaves a 40px element carrying a
+         20px element's width — and the spatial index believes that number, so
+         clicks near the text miss while nothing looks wrong on screen. */
+      tools.onPointerDown(at(0, 0), mods());
+      const id = tools.editingId!;
+      tools.applyTextEdit('hello');
+      tools.endTextEdit();
+
+      selection.set([id]);
+      tools.setTextStyle({ fontSize: 40 });
+
+      const el = scene.get(id)!;
+      if (el.type !== 'text') throw new Error('expected text');
+      expect(el.fontSize).toBe(40);
+      expect(el.width).toBe(100);
+    });
+
+    it('re-measures every text element when the fonts change underneath it', () => {
+      // The webfont case: `ctx.font` falls back silently while a font loads, so
+      // everything laid out in that window was measured against the wrong face.
+      tools.onPointerDown(at(0, 0), mods());
+      tools.applyTextEdit('hello');
+      tools.endTextEdit();
+
+      const wider = new ToolManager(
+        scene,
+        selection,
+        DEFAULT_STYLE,
+        {
+          onDraftChange: vi.fn(),
+          onSelectionChange: vi.fn(),
+          onCommit: vi.fn(),
+          onToolChange: vi.fn(),
+          onEditText: vi.fn(),
+        },
+        createFixedMeasurer(0.9),
+      );
+
+      expect(wider.remeasureText()).toBe(1);
+      const el = scene.sorted()[0]!;
+      expect(el.width).toBeCloseTo(5 * 20 * 0.9, 6);
+    });
+
+    it('re-measuring with the same metrics changes nothing', () => {
+      // `Scene.mutate` compares before writing. If it did not, every font event
+      // would bump `version` on every text element, invalidating the Rough cache
+      // and forcing a full repaint for no reason.
+      tools.onPointerDown(at(0, 0), mods());
+      tools.applyTextEdit('hello');
+      tools.endTextEdit();
+      expect(tools.remeasureText()).toBe(0);
     });
   });
 

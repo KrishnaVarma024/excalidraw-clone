@@ -183,9 +183,19 @@ export class RoughCache {
         );
 
       case 'freedraw':
-        // Freehand is not drawn by Rough.js at all — perfect-freehand builds a
-        // filled outline instead, in drawElement.ts. This branch exists so the
-        // switch stays exhaustive; the drawable is never used.
+      case 'text':
+        /* Neither of these is drawn by Rough.js. Freehand uses perfect-freehand
+           to build a filled outline; text uses `fillText`, because there is no
+           sketchy rendering of a glyph that is still legible at 16px — Excalidraw
+           reaches for a handwriting *font* rather than a hand-drawn *renderer*
+           for exactly this reason.
+
+           These branches exist so the switch stays exhaustive. The drawables are
+           generated and never used, which is a small waste that buys a compile
+           error the day someone adds a variant and forgets this file. That trade
+           already paid for itself once this phase: adding `text` to the union
+           produced three type errors, and all three were places that genuinely
+           needed a decision. */
         return this.generator.linearPath([[0, 0]], o);
 
       default:

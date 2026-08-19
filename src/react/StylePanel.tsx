@@ -1,6 +1,7 @@
 import type { Engine } from '@engine/Engine';
 import type { FillStyle, StrokeStyle } from '@engine/scene/element.types';
 import { TRANSPARENT } from '@engine/scene/element.types';
+import { FONT_SIZES } from '@engine/text/measure';
 import { useEngineState } from './useEngineState';
 
 interface Props {
@@ -23,6 +24,20 @@ const STROKE_STYLES: readonly { value: StrokeStyle; label: string }[] = [
 ];
 
 const WIDTHS = [1, 2, 4];
+const FONT_FAMILIES = [
+  { value: 'hand' as const, label: 'Hand' },
+  { value: 'sans' as const, label: 'Sans' },
+  { value: 'mono' as const, label: 'Mono' },
+];
+
+const FONT_SIZE_OPTIONS = FONT_SIZES.map((v) => ({ value: v, label: `${v}` }));
+
+const TEXT_ALIGNS = [
+  { value: 'left' as const, label: 'Left' },
+  { value: 'center' as const, label: 'Centre' },
+  { value: 'right' as const, label: 'Right' },
+];
+
 const ROUGHNESS = [
   { value: 0, label: 'Architect' },
   { value: 1, label: 'Artist' },
@@ -45,7 +60,12 @@ const ROUGHNESS = [
  * the two-channel split — plain `useSyncExternalStore`, plain re-renders.
  */
 export function StylePanel({ engine }: Props) {
-  const { style } = useEngineState(engine);
+  const { style, activeTool, textStyle } = useEngineState(engine);
+
+  /* Font controls appear only when they can do something — the text tool is
+     active, or a text element is selected. A panel that shows every control for
+     every tool trains people to stop reading it. */
+  const showText = activeTool === 'text' || engine.hasTextSelected();
 
   return (
     <div className="style-panel" aria-label="Element style">
@@ -132,6 +152,34 @@ export function StylePanel({ engine }: Props) {
           onChange={(roughness) => engine.setStyle({ roughness })}
         />
       </Group>
+
+      {showText && (
+        <>
+          <Group label="Font">
+            <Segmented
+              options={FONT_FAMILIES}
+              value={textStyle.fontFamily}
+              onChange={(fontFamily) => engine.setTextStyle({ fontFamily })}
+            />
+          </Group>
+
+          <Group label="Size">
+            <Segmented
+              options={FONT_SIZE_OPTIONS}
+              value={textStyle.fontSize}
+              onChange={(fontSize) => engine.setTextStyle({ fontSize })}
+            />
+          </Group>
+
+          <Group label="Align">
+            <Segmented
+              options={TEXT_ALIGNS}
+              value={textStyle.textAlign}
+              onChange={(textAlign) => engine.setTextStyle({ textAlign })}
+            />
+          </Group>
+        </>
+      )}
 
       <Group label={`Opacity ${style.opacity}%`}>
         <input

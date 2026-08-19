@@ -7,6 +7,14 @@
  */
 
 import { newId, newSeed } from '../util/id';
+import {
+  DEFAULT_FONT_FAMILY,
+  DEFAULT_FONT_SIZE,
+  type FontFamily,
+  type TextAlign,
+  type TextMeasurer,
+} from '../text/measure';
+import { layoutText } from '../text/wrap';
 import { normalizeAngle } from '../util/math';
 import type { Point } from '../util/geometry';
 import {
@@ -17,6 +25,7 @@ import {
   type FreedrawElement,
   type LinearElement,
   type RectangleElement,
+  type TextElement,
   assertNever,
 } from './element.types';
 
@@ -124,6 +133,122 @@ export function newShape(
     default:
       return assertNever(type, 'newShape');
   }
+}
+
+/* ── text ─────────────────────────────────────────────────────────────────── */
+
+export interface TextArgs {
+  x: number;
+  y: number;
+  text: string;
+  style: ElementStyle;
+  zIndex: number;
+  angle?: number;
+  fontSize?: number;
+  fontFamily?: FontFamily;
+  textAlign?: TextAlign;
+  /** null = auto-width. See TextElement. */
+  wrapWidth?: number | null;
+}
+
+/**
+ * A text element, laid out at construction.
+ *
+ * The measurer is a required argument rather than a module-level singleton, and
+ * that is the whole design of this phase in one signature: the caller supplies
+ * the browser (or, in a test, a deterministic stand-in), and nothing under
+ * `src/engine/scene/` ever reaches for a canvas of its own.
+ */
+export function newText(args: TextArgs, measurer: TextMeasurer): TextElement {
+  const font = {
+    fontSize: args.fontSize ?? DEFAULT_FONT_SIZE,
+    fontFamily: args.fontFamily ?? DEFAULT_FONT_FAMILY,
+  };
+  const wrapWidth = args.wrapWidth ?? null;
+  const layout = layoutText(args.text, wrapWidth, font, measurer);
+
+  return {
+    ...base({
+      x: args.x,
+      y: args.y,
+      width: layout.width,
+      height: layout.height,
+      style: args.style,
+      zIndex: args.zIndex,
+      ...(args.angle === undefined ? {} : { angle: args.angle }),
+    }),
+    type: 'text',
+    text: args.text,
+    fontSize: font.fontSize,
+    fontFamily: font.fontFamily,
+    textAlign: args.textAlign ?? 'left',
+    wrapWidth,
+    lines: layout.lines,
+    ascent: layout.ascent,
+    lineHeight: layout.lineHeight,
+  };
+}
+
+/**
+ * The patch that re-lays-out a text element after any layout-affecting change.
+ *
+ * **Every** write to `text`, `fontSize`, `fontFamily` or `wrapWidth` must go
+ * through here, in the same `Scene.mutate` call that makes the change. The
+ * derived fields on a `TextElement` are only correct because this is the single
+ * place that recomputes them, in exactly the way `Scene.mutate` is the single
+ * place that bumps `version`.
+ *
+ * It returns a patch rather than mutating, so it composes with everything else:
+ *
+ *     scene.mutate(id, { ...relayout(el, { text: next }, measurer) })
+ */
+export function relayoutText(
+  el: TextElement,
+  patch: Partial<Pick<TextElement, 'text' | 'fontSize' | 'fontFamily' | 'wrapWidth'>>,
+  measurer: TextMeasurer,
+): Partial<TextElement> {
+  const text = patch.text ?? el.text;
+  const font = {
+    fontSize: patch.fontSize ?? el.fontSize,
+    fontFamily: patch.fontFamily ?? el.fontFamily,
+  };
+  const wrapWidth = patch.wrapWidth === undefined ? el.wrapWidth : patch.wrapWidth;
+
+  const layout = layoutText(text, wrapWidth, font, measurer);
+
+  return {
+    ...patch,
+    text,
+    fontSize: font.fontSize,
+    fontFamily: font.fontFamily,
+    wrapWidth,
+    /* Reuse the existing array when the lines came out identical.
+     *
+     * `Scene.mutate` decides "did anything change" with `Object.is` per key, so
+     * a freshly-allocated array of the same strings reads as a change. Every
+     * other field here is a number and compares by value; `lines` is the one
+     * that does not, and it is the one a re-measure recomputes most often.
+     *
+     * Without this, `remeasureText()` — which runs on `document.fonts.ready`,
+     * for every text element in the document — bumps `version` on all of them
+     * even when the metrics turned out identical. That invalidates the Rough
+     * cache, invalidates the memoised render bounds, and forces a full repaint,
+     * on a code path whose entire job is "check whether anything moved".
+     *
+     * Found by a test that asserted a no-op re-measure returns 0. It returned 1.
+     */
+    lines: sameLines(el.lines, layout.lines) ? el.lines : layout.lines,
+    ascent: layout.ascent,
+    lineHeight: layout.lineHeight,
+    width: layout.width,
+    height: layout.height,
+  };
+}
+
+function sameLines(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 /**
