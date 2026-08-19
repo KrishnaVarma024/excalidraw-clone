@@ -70,6 +70,15 @@ export function hitTestElement(el: Element, point: Point, threshold: number): bo
   switch (el.type) {
     case 'rectangle':
       return hitRectangle(el, p, threshold);
+    case 'text':
+      /* A solid box, always — `isFilled` returns true for text, so this takes
+         the filled branch of `hitRectangle`.
+
+         Per-glyph hit testing is implementable and it is the wrong answer.
+         Clicking the counter of an 'o', or the space between two words, would
+         miss; text would feel broken in a way no user could describe precisely
+         enough to file. Every editor treats a text run as a rectangle. */
+      return hitRectangle(el, p, threshold);
     case 'diamond':
       return hitDiamond(el, p, threshold);
     case 'ellipse':

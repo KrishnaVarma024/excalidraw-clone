@@ -63,6 +63,17 @@ const TOOLS: readonly ToolDef[] = [
     shortcut: 'P',
     icon: <path d="M3 17c3-1 4-9 7-9s2 8 5 8 4-5 6-6" />,
   },
+  {
+    tool: 'text',
+    label: 'Text',
+    shortcut: 'T',
+    icon: (
+      <>
+        <path d="M5 6h14" />
+        <path d="M12 6v13" />
+      </>
+    ),
+  },
 ];
 
 /**

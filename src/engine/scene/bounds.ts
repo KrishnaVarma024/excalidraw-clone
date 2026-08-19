@@ -93,6 +93,19 @@ export function getRotatedBounds(el: Element): Bounds {
  * width outside the recorded points.
  */
 export function getRenderPadding(el: Element): number {
+  /* Text is not drawn by Rough.js and is not stroked, so neither the jitter nor
+     the stroke-width terms apply. What it does need is headroom for glyphs that
+     paint outside the line box: an accented capital reaches above the font's
+     declared ascent, and a descender on the last line reaches below its descent.
+     `TextMetrics.actualBoundingBox*` would give the exact answer per string, and
+     asking for it here would put a measurement back inside the cull — which is
+     precisely what this phase went to some trouble to avoid.
+
+     A fraction of the font size is generous enough for Latin, cheap, and errs
+     outward. Over-padding a dirty rectangle costs a few wasted pixels; under-
+     padding it leaves a permanent ghost of a descender on the canvas. */
+  if (el.type === 'text') return el.fontSize * 0.25 + 1;
+
   const stroke = el.strokeWidth / 2;
   const jitter = el.roughness * 2;
   const freehand = el.type === 'freedraw' ? el.strokeWidth : 0;

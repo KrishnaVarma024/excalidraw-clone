@@ -15,7 +15,15 @@
 import rough from 'roughjs';
 import type { RoughCanvas } from 'roughjs/bin/canvas';
 import getStroke from 'perfect-freehand';
-import { type Element, type FreedrawElement, type LinearElement, assertNever } from '../scene/element.types';
+import {
+  type Element,
+  type FreedrawElement,
+  type LinearElement,
+  type TextElement,
+  assertNever,
+} from '../scene/element.types';
+import { fontString } from '../text/measure';
+import { alignOffset } from '../text/wrap';
 import { getElementCenter } from '../scene/bounds';
 import type { RoughCache } from './roughCache';
 
@@ -81,6 +89,10 @@ export function drawElement(
       drawFreedraw(ctx, el);
       break;
 
+    case 'text':
+      drawText(ctx, el);
+      break;
+
     default:
       assertNever(el, 'drawElement');
   }
@@ -138,6 +150,52 @@ export function drawFreedraw(ctx: CanvasRenderingContext2D, el: FreedrawElement)
   // a figure-eight, a scribble — has overlapping outline regions, and evenodd
   // punches holes in exactly those overlaps.
   ctx.fill('nonzero');
+}
+
+/* ── text ─────────────────────────────────────────────────────────────────── */
+
+/**
+ * Draw the pre-wrapped lines.
+ *
+ * Note what is *not* here: no measuring, no wrapping, no font-metric lookup.
+ * `el.lines`, `el.ascent` and `el.lineHeight` were computed when the text last
+ * changed and stored on the element. This function is a loop over strings.
+ *
+ * That is the payoff for the awkward part of the design. Drawing runs on every
+ * frame that touches this element; laying out runs on every keystroke. Keeping
+ * them apart means the expensive one happens at the rate a human types rather
+ * than the rate a monitor refreshes.
+ *
+ * ── Baselines ──────────────────────────────────────────────────────────────
+ *
+ * `textBaseline = 'alphabetic'` — the default, and the one that is stable.
+ * `'top'` is tempting because it matches how the box is described, and it means
+ * something slightly different in every font, so identical text sits at
+ * different heights depending on family. Positioning from the baseline and
+ * carrying an explicit `ascent` keeps the offset a number this codebase owns.
+ */
+export function drawText(ctx: CanvasRenderingContext2D, el: TextElement): void {
+  if (el.lines.length === 0) return;
+
+  ctx.fillStyle = el.strokeColor;
+  ctx.font = fontString(el);
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left'; // alignment is done by offset, so it works inside the box
+
+  for (let i = 0; i < el.lines.length; i++) {
+    const line = el.lines[i]!;
+    if (line === '') continue; // a blank line still advances y, but draws nothing
+
+    /* Alignment is computed against the *box*, not the canvas, so it keeps
+       working when the element is rotated — the rotation is already installed on
+       the context above. Using `ctx.textAlign` instead would align against the
+       x coordinate passed to fillText, which is the same thing only for
+       'left'. */
+    const offset =
+      el.textAlign === 'left' ? 0 : alignOffset(ctx.measureText(line).width, el.width, el.textAlign);
+
+    ctx.fillText(line, el.x + offset, el.y + el.ascent + i * el.lineHeight);
+  }
 }
 
 /* ── arrowheads ───────────────────────────────────────────────────────────── */

@@ -67,11 +67,25 @@ import {
   type FreedrawElement,
   type LinearElement,
 } from '../scene/element.types';
-import { newFreedraw, newShape, normalizeDrag, type ShapeToolType } from '../scene/elementFactory';
+import {
+  newFreedraw,
+  newShape,
+  newText,
+  normalizeDrag,
+  relayoutText,
+  type ShapeToolType,
+} from '../scene/elementFactory';
+import {
+  DEFAULT_FONT_FAMILY,
+  DEFAULT_FONT_SIZE,
+  type FontFamily,
+  type TextAlign,
+  type TextMeasurer,
+} from '../text/measure';
 import { simplifyStroke } from '../util/simplify';
 import { roundTo, TAU } from '../util/math';
 
-export type ToolType = 'selection' | ShapeToolType | 'freedraw';
+export type ToolType = 'selection' | ShapeToolType | 'freedraw' | 'text';
 
 /** Keyboard shortcut → tool. Matches Excalidraw's, which is what people expect. */
 export const TOOL_SHORTCUTS: Readonly<Record<string, ToolType>> = {
@@ -89,6 +103,8 @@ export const TOOL_SHORTCUTS: Readonly<Record<string, ToolType>> = {
   '6': 'line',
   p: 'freedraw',
   '7': 'freedraw',
+  t: 'text',
+  '8': 'text',
 };
 
 /** Below this drag distance (scene units) a shape is discarded as a stray click. */
@@ -106,6 +122,14 @@ const ANGLE_SNAP = TAU / 24;
  */
 const SIMPLIFY_TOLERANCE = 0.6;
 
+/** Font size limits for a corner-drag resize. Below 4px text is a smudge. */
+const MIN_FONT_SIZE = 4;
+const MAX_FONT_SIZE = 400;
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
+
 export interface ToolCallbacks {
   /** The draft or the marquee changed — repaint the interactive layer. */
   onDraftChange: () => void;
@@ -115,6 +139,14 @@ export interface ToolCallbacks {
   onCommit: (element: Element) => void;
   /** The active tool changed — React needs to know. */
   onToolChange: (tool: ToolType) => void;
+  /**
+   * Open the text editor on this element, or close it when null.
+   *
+   * The tool decides *when* editing starts; it does not know what an editor is.
+   * A `<textarea>` is a DOM concern, and `src/engine/` has no DOM in it — see
+   * `tests/engine/boundary.test.ts`.
+   */
+  onEditText: (id: ElementId | null) => void;
 }
 
 export interface PointerModifiers {
@@ -162,6 +194,8 @@ export class ToolManager {
    */
   private drag: DragState | null = null;
   private hovered: HandleKind | null = null;
+  /** The text element whose editor is open, or null. */
+  private editing: ElementId | null = null;
   /** Shift was held when the marquee began — add to the selection rather than replace. */
   private marqueeAdditive = false;
   /** The selection as it was when the marquee began, so the preview can be live. */
@@ -176,9 +210,26 @@ export class ToolManager {
     private readonly selection: Selection,
     style: ElementStyle,
     private readonly cb: ToolCallbacks,
+    /**
+     * How to measure text.
+     *
+     * Required, not optional with a fallback. A default that quietly used a fake
+     * measurer would lay every string out at the wrong width in production and
+     * pass every test — the worst possible shape for a bug. Making it a required
+     * argument turns "somebody forgot to wire the browser in" into a compile
+     * error.
+     */
+    private readonly measurer: TextMeasurer,
   ) {
     this.style = { ...style };
   }
+
+  /** Font settings for the next text element, and for the current selection. */
+  private textStyle: { fontSize: number; fontFamily: FontFamily; textAlign: TextAlign } = {
+    fontSize: DEFAULT_FONT_SIZE,
+    fontFamily: DEFAULT_FONT_FAMILY,
+    textAlign: 'left',
+  };
 
   /* ── state ──────────────────────────────────────────────────────────────── */
 
@@ -231,6 +282,7 @@ export class ToolManager {
   /** @returns true if the tool consumed the event (so panning should not run). */
   onPointerDown(scene: Point, mod: PointerModifiers): boolean {
     if (this.tool === 'selection') return this.beginSelection(scene, mod);
+    if (this.tool === 'text') return this.beginText(scene);
 
     this.drawing = true;
     this.origin = scene;
@@ -411,6 +463,170 @@ export class ToolManager {
     this.marquee = null;
     this.marqueeAdditive = false;
     this.marqueeBase = new Set();
+  }
+
+  /* ── text ───────────────────────────────────────────────────────────────── */
+
+  /**
+   * Click with the text tool: place an empty element and open the editor.
+   *
+   * Text is the only tool with no drag. Dragging out a box before typing is a
+   * defensible design — it is how you would create a fixed-width paragraph — and
+   * it costs you the single most common interaction, which is click-and-type.
+   * Excalidraw, Figma and Keynote all resolve it the same way: click makes an
+   * auto-width run, and dragging a side handle afterwards converts it to a
+   * wrapped one.
+   *
+   * The element is added to the scene immediately rather than living as a draft.
+   * That looks like it breaks the rule from Phase 2 — in-progress geometry stays
+   * off the scene — and the difference is real: a half-drawn rectangle has no
+   * meaning until you release, whereas an empty text element is a caret position
+   * the user is looking at. The empty case is cleaned up in `endTextEdit`.
+   */
+  private beginText(scene: Point): boolean {
+    const el = newText(
+      {
+        x: scene.x,
+        y: scene.y,
+        text: '',
+        style: this.style,
+        zIndex: this.scene.nextZIndex(),
+        fontSize: this.textStyle.fontSize,
+        fontFamily: this.textStyle.fontFamily,
+        textAlign: this.textStyle.textAlign,
+      },
+      this.measurer,
+    );
+
+    /* Place the caret where the user clicked rather than putting the box's
+       top-left there. Clicking and having the text appear below-right of the
+       pointer is the kind of small wrongness that makes a tool feel cheap. */
+    this.scene.add({ ...el, y: el.y - el.height / 2 });
+
+    this.selection.set([el.id]);
+    this.cb.onSelectionChange();
+    this.cb.onCommit(el);
+    this.editing = el.id;
+    this.cb.onEditText(el.id);
+    return true;
+  }
+
+  /** The element currently being edited, or null. */
+  get editingId(): ElementId | null {
+    return this.editing;
+  }
+
+  /**
+   * Open the editor on an existing text element. Returns false if it is not one.
+   *
+   * Called by the double-click path, which is how you edit text in every tool
+   * anyone has used.
+   */
+  editTextAt(scene: Point, mod: PointerModifiers): boolean {
+    const hit = this.scene.hitTest(scene, mod.hitThreshold);
+    if (hit === null || hit.type !== 'text') return false;
+
+    if (this.selection.set([hit.id])) this.cb.onSelectionChange();
+    this.editing = hit.id;
+    this.cb.onEditText(hit.id);
+    return true;
+  }
+
+  /**
+   * Write the edited string back, re-laying-out in the same mutation.
+   *
+   * `relayoutText` is not optional here and it is not a nicety. `text`,
+   * `fontSize`, `fontFamily` and `wrapWidth` all feed `lines`, `width` and
+   * `height`; writing one without recomputing the others leaves an element whose
+   * stored size disagrees with its content, which means the spatial index has
+   * the wrong rectangle for it and clicks near it miss.
+   */
+  applyTextEdit(value: string): boolean {
+    const id = this.editing;
+    if (id === null) return false;
+
+    const el = this.scene.get(id);
+    if (el === undefined || el.type !== 'text') return false;
+    if (el.text === value) return false;
+
+    return this.scene.mutate(id, relayoutText(el, { text: value }, this.measurer));
+  }
+
+  /**
+   * Close the editor, discarding the element if nothing was typed.
+   *
+   * The discard is what makes "click with the text tool, change your mind, click
+   * elsewhere" behave. Without it every stray click leaves an invisible,
+   * zero-content, fully selectable element in the document — and in the spatial
+   * index, and in the undo history, and in the export.
+   */
+  endTextEdit(): void {
+    const id = this.editing;
+    this.editing = null;
+    if (id === null) return;
+
+    const el = this.scene.get(id);
+    if (el !== undefined && el.type === 'text' && el.text.trim() === '') {
+      this.scene.remove(id);
+      if (this.selection.remove([id])) this.cb.onSelectionChange();
+    }
+
+    this.cb.onEditText(null);
+  }
+
+  /** Font settings for new text, and applied to any selected text elements. */
+  setTextStyle(patch: Partial<{ fontSize: number; fontFamily: FontFamily; textAlign: TextAlign }>): void {
+    this.textStyle = { ...this.textStyle, ...patch };
+
+    for (const id of this.selection.ids()) {
+      const el = this.scene.get(id);
+      if (el === undefined || el.type !== 'text') continue;
+
+      // textAlign does not affect layout, so it is a plain patch; the other two
+      // do, so they must go through relayoutText.
+      const layoutPatch =
+        patch.fontSize === undefined && patch.fontFamily === undefined
+          ? {}
+          : relayoutText(
+              el,
+              {
+                ...(patch.fontSize === undefined ? {} : { fontSize: patch.fontSize }),
+                ...(patch.fontFamily === undefined ? {} : { fontFamily: patch.fontFamily }),
+              },
+              this.measurer,
+            );
+
+      this.scene.mutate(id, {
+        ...layoutPatch,
+        ...(patch.textAlign === undefined ? {} : { textAlign: patch.textAlign }),
+      });
+    }
+  }
+
+  getTextStyle(): Readonly<{ fontSize: number; fontFamily: FontFamily; textAlign: TextAlign }> {
+    return this.textStyle;
+  }
+
+  /**
+   * Re-lay-out every text element in the scene.
+   *
+   * Called when the measurements this codebase cached are no longer the
+   * measurements the browser would give — which happens for exactly one reason
+   * in practice, and it is a genuinely nasty one: **a webfont finished loading
+   * after the text was laid out.** Until the font arrives, `ctx.font` silently
+   * falls back to a different family with different metrics, so every string was
+   * measured against the wrong face. Nothing throws. The text simply sits at the
+   * wrong width, wrapped in the wrong places, until something else touches it.
+   *
+   * `document.fonts.ready` is the hook. This is the response.
+   */
+  remeasureText(): number {
+    let changed = 0;
+    for (const el of this.scene.sorted()) {
+      if (el.type !== 'text') continue;
+      if (this.scene.mutate(el.id, relayoutText(el, {}, this.measurer))) changed++;
+    }
+    return changed;
   }
 
   /* ── the selection tool ─────────────────────────────────────────────────── */
@@ -604,7 +820,9 @@ export class ToolManager {
     }
 
     const patches = this.computeTransform(drag, scene, mod);
-    for (const [id, geometry] of patches) this.scene.mutate(id, geometry);
+    for (const [id, geometry] of patches) {
+      this.scene.mutate(id, this.textAware(id, geometry, drag.handle));
+    }
     this.cb.onDraftChange();
   }
 
@@ -636,6 +854,83 @@ export class ToolManager {
       return out;
     }
     return resizeGroup(drag.snapshot, drag.box, drag.handle, pointer, mod);
+  }
+
+  /**
+   * Translate a geometry patch into something a text element can honour.
+   *
+   * ── Text does not have a width and a height, it has a width ────────────────
+   *
+   * Height is *derived*: it is however many lines the content wraps to, times
+   * the line height. So the eight resize handles cannot all mean what they mean
+   * for a rectangle, and pretending otherwise gives you a box whose stored
+   * height is 200 while its content is 60 tall — which the spatial index and the
+   * dirty tracker both believe.
+   *
+   * The mapping every editor converged on, and why:
+   *
+   *   corner  scale the FONT. Dragging a corner is "make this bigger", and for
+   *           text that means the type gets bigger, not that the same 20px type
+   *           is stretched into a taller box.
+   *   e / w   set the WRAP WIDTH and reflow. This is also how an auto-width run
+   *           becomes a wrapped paragraph — there is no mode switch in the UI,
+   *           you just drag a side.
+   *   n / s   nothing. There is no height to set. Silently ignoring the drag is
+   *           better than accepting it and having the box spring back on the
+   *           next keystroke.
+   *
+   * The scale factor comes from the *width* even for a corner drag, because the
+   * height the pointer implies is not a height the element can adopt. Using the
+   * larger of the two axes would make a downward corner drag grow the font while
+   * the box refuses to follow, and the shape would crawl away from the cursor.
+   */
+  private textAware(
+    id: ElementId,
+    geometry: GeometryPatch,
+    handle: HandleKind | null,
+  ): Partial<Element> {
+    const el = this.scene.get(id);
+    if (el === undefined || el.type !== 'text') return geometry;
+
+    // A move is a move, whatever the element type.
+    if (handle === null || handle === 'rotate') return geometry;
+
+    if (handle === 'n' || handle === 's') {
+      // Position may still have changed (dragging 'n' moves the top edge), but
+      // the size must not.
+      return { x: geometry.x, y: geometry.y, angle: geometry.angle };
+    }
+
+    if (handle === 'e' || handle === 'w') {
+      const wrapWidth = Math.max(geometry.width, el.fontSize);
+      return {
+        x: geometry.x,
+        y: geometry.y,
+        angle: geometry.angle,
+        ...relayoutText(el, { wrapWidth }, this.measurer),
+      };
+    }
+
+    // A corner: scale the font by the width ratio.
+    const scale = el.width === 0 ? 1 : geometry.width / el.width;
+    const fontSize = clamp(Math.round(el.fontSize * scale), MIN_FONT_SIZE, MAX_FONT_SIZE);
+
+    return {
+      x: geometry.x,
+      y: geometry.y,
+      angle: geometry.angle,
+      ...relayoutText(
+        el,
+        {
+          fontSize,
+          // A wrapped block keeps wrapping, and its wrap width scales with the
+          // type so the line breaks land in the same places. An auto-width run
+          // stays auto-width.
+          ...(el.wrapWidth === null ? {} : { wrapWidth: el.wrapWidth * (fontSize / el.fontSize) }),
+        },
+        this.measurer,
+      ),
+    };
   }
 
   private endTransform(): void {

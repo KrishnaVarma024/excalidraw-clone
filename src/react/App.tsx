@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { Engine } from '@engine/Engine';
 import { CanvasHost } from './CanvasHost';
 import { DevPanel } from './DevPanel';
+import { TextEditor } from './TextEditor';
 import { SelectionBar } from './SelectionBar';
 import { StatsOverlay } from './StatsOverlay';
 import { StylePanel } from './StylePanel';
@@ -28,21 +29,27 @@ export function App() {
           <StatsOverlay engine={engine} />
           <DevPanel engine={engine} />
           <SelectionBar engine={engine} />
+          <TextEditor engine={engine} />
         </>
       )}
 
       <div className="badge">
-        <strong>Phase 6 — move, resize, rotate.</strong>
+        <strong>Phase 7 — text.</strong>
         <br />
-        Every gesture transforms from the <em>snapshot</em> taken when the pointer
-        landed, never from the shape&rsquo;s current state. Press Shift mid-resize:
-        the ratio locks to what you originally drew, not to whatever the shape
-        happens to be at that instant. Incremental code cannot do that.
+        Press <em>T</em> and click, then type. This is the first element whose
+        size this codebase does not decide — the browser does, via{' '}
+        <em>measureText</em> — so the measurement is passed in and the result is
+        cached on the element. That is what keeps the engine unit-testable in Node
+        with no canvas at all.
         <br />
-        Load <em>50k</em>, select a shape and drag it. <em>coverage</em> stays
-        around a percent — this is where Phase 5 gets spent, because a committed
-        element moving mutates the scene on every frame. Select twenty and drag:
-        it flips to <em>full</em>, which is the fallback working.
+        The caret is a real <em>&lt;textarea&gt;</em> lined up on top of the
+        canvas. Not a shortcut: it is what makes IME, spellcheck, the mobile
+        keyboard and every screen reader work. Type, then press Escape — the
+        glyphs land in exactly the same pixels, at any zoom.
+        <br />
+        Drag a <em>side</em> handle to wrap the text; drag a <em>corner</em> to
+        scale the type. Text has a width but not a height — the height is however
+        many lines it wrapped to.
       </div>
     </div>
   );
