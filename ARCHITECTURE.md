@@ -1015,36 +1015,131 @@ the height the pointer implies is not a height the element can adopt.
 
 ---
 
-## 8. History (undo / redo)
+## 8. History (undo / redo) and persistence
 
-Two viable designs:
+### 8.1 Snapshots of the touched elements
 
-| | **Snapshot** | **Command / inverse-patch** |
-|---|---|---|
-| Store | the changed elements, before + after | an operation + its inverse |
-| Undo | write the "before" objects back | apply the inverse |
-| Memory | O(changed elements) per entry | O(1)-ish per entry |
-| Complexity | low | high — every op needs a correct inverse |
-| Merging typing into one entry | easy | easy |
+Three designs are viable and the middle one wins:
 
-**v1 uses snapshots of only the touched elements**, capped at 100 entries.
+| | Store | Memory per entry | Cost |
+|---|---|---|---|
+| whole-scene snapshot | everything | O(scene) | unusable at 50,000 × 100 entries |
+| **element snapshots** | the objects a gesture touched, before and after | **O(touched)** | none worth naming |
+| command + inverse | an operation and its inverse | O(1)-ish | every op needs a correct inverse, and they drift silently |
 
 ```ts
 interface HistoryEntry {
-  before: Map<ElementId, Element | null>;  // null = did not exist
-  after:  Map<ElementId, Element | null>;
-  viewportBefore?: Viewport;               // undo should restore where you were looking
+  before: ReadonlyMap<ElementId, Element | null>;  // null = did not exist
+  after:  ReadonlyMap<ElementId, Element | null>;
+  selectionBefore: readonly ElementId[];           // undo should put you back
+  selectionAfter:  readonly ElementId[];
 }
 ```
 
-Elements are immutable-on-write within an entry (structural sharing), so the memory cost is the
-handful of objects a gesture actually touched, not the whole scene.
+An entry holds **references**, not copies, and it can because `Scene.mutate` never edits in place
+(§3.2). The old object is still there and still effectively immutable. A 400-point freehand stroke
+dragged for three seconds produces ~180 objects; history keeps two of them.
 
-The interview-grade point: **undo must dirty both the before-bounds and the after-bounds of
-every element it touches, and must repair the spatial index.** Undo is just another mutation
-and must go through the same `Scene.mutate()` path. If you write a special-case undo that
-bypasses it, the quadtree silently desynchronises and clicks start missing shapes. That is a
-real bug you will hit.
+That is the fourth feature paid for by one rule — *one mutator, always a new object* — after the
+Rough drawable cache, the memoised render bounds, and the WeakMap in §6.4.
+
+### 8.2 One gesture is one entry: first `before`, last `after`
+
+A three-second drag calls `mutate` about 180 times. The entry must hold the geometry from before the
+drag started and the geometry after it ended, and nothing in between. So the first time an id is
+touched inside a batch its "before" is kept forever; its "after" is overwritten every time.
+
+Batches are **counted, not boolean**, because a command can legitimately run inside a gesture. Text
+editing depends on it: the editor opens a nested batch inside the pointer gesture, `onPointerUp`
+closes the outer one, and everything typed afterwards still lands in the same entry — so creating a
+text run and typing a sentence into it is one undo, not forty.
+
+**Recording is on by default; batching is the optimisation.** The alternative — ignore anything
+outside an explicit batch — looks safer and fails worse: forget to open a batch and the operation is
+*silently not undoable*, which nobody notices until a user loses work. Recording by default means
+forgetting a batch gives an action that takes more undos than ideal. Changes that are genuinely not
+user actions (loading, re-measuring text when a webfont arrives) go through `history.suppress`.
+
+### 8.3 Two invariants that are easy to break
+
+**Undo is a mutation, not a special case.** Applying an entry goes through `Scene.mutate` and
+`Scene.add` like everything else, because those maintain the quadtree, the content bounds and the
+dirty rectangles. An undo path that wrote into the element map directly leaves the spatial index
+describing where shapes *used to be*, and the symptom — clicks missing shapes — surfaces minutes
+later, somewhere else, with nothing connecting it back.
+
+**`version` must never go backwards.** The obvious undo puts the old object back, which restores its
+old `version` — and `version` is the cache key §3.2 exists to maintain. Concretely: an element goes
+v5 → v6 → v7; undo restores the v5 object; the user edits once more and it is v6 again with
+*different* geometry, while the drawable cached under `id:6` is the old shape. The canvas draws a
+shape that no longer exists.
+
+So an entry is applied as a **patch** and `Scene.mutate` bumps the version as it always does.
+
+**Undo must not itself be undoable.** The mutations it performs come back through the same change
+feed history is listening to. Without a re-entrancy guard the stack oscillates between two states
+and the user can never reach the third.
+
+---
+
+### 8.4 Persistence: why IndexedDB
+
+Measured on this project's generated scenes:
+
+| elements | document | `JSON.stringify` | `structuredClone` |
+|---:|---:|---:|---:|
+| 1,000 | 0.50 MB | 3.2 ms | 3.8 ms |
+| 10,000 | 4.94 MB | 34.7 ms | 44.2 ms |
+| 50,000 | **24.69 MB** | 492.9 ms | 389.0 ms |
+
+localStorage's quota is ~5 MB, so a document outgrows it around **ten thousand elements** — a
+mid-sized scene here, not an extreme one. It fails by throwing on write, at the moment the user has
+done the most work, and it is synchronous on top of that.
+
+The last column is the one worth carrying: storing the object graph directly in IndexedDB rather
+than a JSON string does **not** escape the serialisation cost. The structured clone happens on the
+calling thread when `put` is called.
+
+So the cost is not made cheap, it is **moved**:
+
+1. **Debounce** — 1.2 s of quiet before a save, so a hundred keystrokes produce one write of the
+   final state rather than a hundred writes nobody will read.
+2. **`requestIdleCallback`** — the hitch lands in the gap after the gesture instead of inside it.
+
+| 50k elements, one 150-step drag | debounced + idle | saved on every change |
+|---|---:|---:|
+| frame p50 | **5.10 ms** | 123.10 ms |
+| frame p95 | **7.10 ms** | 165.20 ms |
+| wall clock | **7.5 s** | 28.2 s |
+
+A worker would make it genuinely free and is scoped out with the number attached: getting 50,000
+elements across the boundary costs most of the clone again unless the scene lives in a
+SharedArrayBuffer from the start, which is a different data model.
+
+**There is no localStorage fallback.** When IndexedDB is unavailable — some private-browsing modes,
+or switched off — the table above says a fallback would silently fail for any real document. So
+`available` goes false, the reason is reported, and the UI says *"not saving"*. A bad situation the
+user can respond to beats a worse one they discover later.
+
+### 8.5 `restore` is the whole of the file format
+
+`serialize` is two lines. Everything that matters is on the way back in, because **the file being
+loaded was written by a different version of this program than the one reading it** — true from the
+second release onwards, and true right now for anything saved before the last change.
+
+| Decision | Failure it prevents |
+|---|---|
+| Check a `type` discriminator first | Any JSON with an `elements` array looks close enough to load, and fails as an unrecognisable drawing rather than "not one of ours" |
+| **Refuse a newer schema; repair an older one** | Fields you do not know about may change how the ones you do know about should be read. Guessing produces a document that looks plausible and is wrong — then the user saves over it |
+| Drop unknown element types, keep their neighbours | A build that adds `image` writes one; this build must still open the rest of the document |
+| Replace NaN and Infinity | A NaN width makes bounds NaN, makes every quadtree comparison false, and makes the element permanently unclickable *and* invisible to the cull, with nothing in the UI to explain it |
+| Re-align `pressures` to `points` | perfect-freehand indexes positionally; a length mismatch silently tapers the wrong part of the stroke |
+| Never throw | A corrupt document must give an empty canvas and a message. The user's other documents are fine and the app has to stay usable enough to say so |
+| **Re-measure every text element** | §7.4.1: the derived fields were measured on the machine that saved the file. Trusting them gives text whose stored box disagrees with its own glyphs, and a spatial index that says the text is somewhere it visibly is not |
+
+Soft-deleted elements are not written. They exist so undo and the selection can reference them
+(§3.3); once the document is on disk nothing references them, and keeping them means a file that
+grows forever as the user deletes things.
 
 ---
 

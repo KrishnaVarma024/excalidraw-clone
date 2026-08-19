@@ -48,6 +48,9 @@ import { getRenderBounds, getSceneBounds } from './scene/bounds';
 import { DEFAULT_STYLE, type Element, type ElementId, type ElementStyle } from './scene/element.types';
 import { TOOL_SHORTCUTS, ToolManager, type ToolType } from './tools/ToolManager';
 import { Selection } from './tools/Selection';
+import { History, type HistoryStats } from './history/History';
+import { restore, serialize, type StoredAppState } from './persist/document';
+import { DocumentStore, type StorageStats } from './persist/storage';
 import {
   DEFAULT_FONT_FAMILY,
   DEFAULT_FONT_SIZE,
@@ -103,6 +106,17 @@ export interface EngineSnapshot {
   readonly textStyle: Readonly<{ fontSize: number; fontFamily: FontFamily; textAlign: TextAlign }>;
   /** Whether the selection contains at least one text element. */
   readonly hasText: boolean;
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  /**
+   * Null while persistence is healthy; a reason when it is not.
+   *
+   * Surfaced in the UI rather than swallowed. "Your work is not being saved" is
+   * information the user can act on — export, copy elsewhere, switch out of
+   * private browsing — and hiding it to keep the interface clean is choosing a
+   * tidy screen over the user's document.
+   */
+  readonly storageError: string | null;
 }
 
 /**
@@ -157,6 +171,10 @@ export interface FrameInfo {
   readonly hit: HitStats;
   /** Frames skipped because nothing changed. High is good. */
   readonly idleFrames: number;
+  /** Undo/redo depth. Discrete, but it rides this channel because the overlay
+   *  is where every other number a human glances at already lives. */
+  readonly history: HistoryStats;
+  readonly storage: StorageStats;
 }
 
 /**
@@ -272,6 +290,9 @@ export class Engine {
     editingTextId: null,
     textStyle: { fontSize: DEFAULT_FONT_SIZE, fontFamily: DEFAULT_FONT_FAMILY, textAlign: 'left' },
     hasText: false,
+    canUndo: false,
+    canRedo: false,
+    storageError: null,
   };
 
   private panAffordance = false;
@@ -289,6 +310,18 @@ export class Engine {
 
   /** The text element whose editor is open. Hidden from the static layer. */
   private editingText: ElementId | null = null;
+
+  /**
+   * Undo/redo.
+   *
+   * Takes a getter for the selection rather than the `Selection` object, because
+   * history has no business changing it — it only needs to remember what was
+   * selected so undo can put the user back where they were.
+   */
+  private readonly history = new History(() => [...this.selection.ids()]);
+
+  private readonly store = new DocumentStore();
+  private storageReady = false;
 
   constructor(
     private readonly staticCanvas: HTMLCanvasElement,
@@ -328,6 +361,12 @@ export class Engine {
         if (this.tools.editingId !== null) this.tools.endTextEdit();
         this.refreshSnapshot();
       },
+      onGestureStart: (label) => this.history.begin(label),
+      onGestureEnd: (committed) => {
+        if (committed) this.history.commit();
+        else this.history.abort();
+        this.refreshSnapshot();
+      },
       onEditText: (id) => {
         this.editingText = id;
         this.renderer.setHidden(id);
@@ -359,7 +398,17 @@ export class Engine {
 
       // `load()` and `clear()` report a null/null change: not a region, a new
       // scene. Nothing local about that.
-      if (change.before === null && change.after === null) this.dirty.force('global');
+      if (change.before === null && change.after === null) {
+        this.dirty.force('global');
+        /* And nothing undoable about it either. The stacks reference elements
+           this document has never contained; applying one would resurrect them
+           into the middle of an unrelated drawing. */
+        this.history.clear();
+      } else {
+        this.history.record(change.id, change.beforeElement, change.afterElement);
+      }
+
+      this.scheduleSave();
 
       // A moved or deleted element changes where the selection outline goes.
       this.selectionBoundsDirty = true;
@@ -379,6 +428,16 @@ export class Engine {
         this.dirty.force('global');
         this.needsStaticRender = true;
         this.needsInteractiveRender = true;
+        /* The viewport is part of the saved document, and nothing else schedules
+           a save for it: the scene change feed only fires when an *element*
+           changes. Without this line, panning and zooming are recorded in memory,
+           written on the next element edit, and lost entirely if there is not
+           one — so reopening a document drops you back at 100% at the origin.
+
+           Found by the browser test, which reloaded after a zoom and got 100%
+           back. Nothing in the unit tests could have seen it: they never involve
+           two subsystems whose only connection is that they share a file. */
+        this.scheduleSave();
         this.refreshSnapshot();
       },
       onPanStateChange: ({ spaceHeld, panning }) => {
@@ -422,6 +481,20 @@ export class Engine {
           this.tools.selectAll();
           return true;
         }
+
+        /* ⌘Z / ⌘⇧Z, and ⌘Y as well because Windows users reach for it.
+           `e.key` rather than `e.code`: on a Dvorak or AZERTY layout the physical
+           Z key is somewhere else entirely, and the shortcut has to follow the
+           letter the user thinks they are pressing. */
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+          if (e.shiftKey) this.redo();
+          else this.undo();
+          return true;
+        }
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'y') {
+          this.redo();
+          return true;
+        }
         if (e.key === 'Delete' || e.key === 'Backspace') {
           this.tools.deleteSelected();
           // Consumed even when nothing was selected: an unhandled Backspace is
@@ -458,6 +531,7 @@ export class Engine {
 
   destroy(): void {
     this.stop();
+    this.store.close();
     this.input.destroy();
     this.listeners.clear();
     this.frameListeners.clear();
@@ -759,6 +833,9 @@ export class Engine {
       editingTextId: this.editingText,
       textStyle: this.tools.getTextStyle(),
       hasText: this.hasTextSelected(),
+      canUndo: this.history.canUndo,
+      canRedo: this.history.canRedo,
+      storageError: this.storageReady ? null : this.store.stats().reason,
     };
 
     const prev = this.snapshot;
@@ -778,7 +855,10 @@ export class Engine {
       prev.cursor === next.cursor &&
       prev.editingTextId === next.editingTextId &&
       prev.textStyle === next.textStyle &&
-      prev.hasText === next.hasText
+      prev.hasText === next.hasText &&
+      prev.canUndo === next.canUndo &&
+      prev.canRedo === next.canRedo &&
+      prev.storageError === next.storageError
     ) {
       return; // nothing React can observe changed — do not touch the reference
     }
@@ -908,6 +988,122 @@ export class Engine {
     return changed;
   }
 
+
+  /* ── history ────────────────────────────────────────────────────────────── */
+
+  /**
+   * Undo one gesture.
+   *
+   * Note what this does *not* do: touch the element map, the quadtree, or the
+   * dirty tracker. `History.apply` goes through `Scene.mutate` and `Scene.add`
+   * exactly like a drag does, so the index stays in step and the repaired
+   * rectangles fall out of the normal change feed. An undo that wrote elements
+   * back directly would leave the spatial index describing where shapes used to
+   * be, and the symptom — clicks missing shapes — would show up much later, in a
+   * different part of the app, with nothing pointing back here.
+   */
+  undo(): boolean {
+    const selection = this.history.undo(this.scene);
+    if (selection === null) return false;
+    this.afterHistory(selection);
+    return true;
+  }
+
+  redo(): boolean {
+    const selection = this.history.redo(this.scene);
+    if (selection === null) return false;
+    this.afterHistory(selection);
+    return true;
+  }
+
+  private afterHistory(selection: readonly ElementId[]): void {
+    /* Restore the selection the gesture had. Undoing a delete and finding
+       nothing selected means the user has to hunt for what just came back — and
+       an undo that leaves you somewhere you were not is only half an undo. */
+    const alive = selection.filter((id) => {
+      const el = this.scene.get(id);
+      return el !== undefined && !el.isDeleted;
+    });
+    if (this.selection.set(alive)) this.cbSelectionChanged();
+
+    this.needsStaticRender = true;
+    this.needsInteractiveRender = true;
+    this.refreshSnapshot();
+  }
+
+  private cbSelectionChanged(): void {
+    this.selectionBoundsDirty = true;
+    this.hasTextDirty = true;
+  }
+
+  get historyStats(): HistoryStats {
+    return this.history.stats();
+  }
+
+  /* ── persistence ────────────────────────────────────────────────────────── */
+
+  /**
+   * Open the store and load whatever was there. Call once, after construction.
+   *
+   * Everything it does is inside `history.suppress`: loading is not a user action
+   * and must not be undoable. Without that, the first thing on the undo stack of
+   * every session is "throw away the document I just opened", one keystroke away
+   * from the user at all times.
+   */
+  async openDocument(): Promise<{ loaded: number; dropped: number; error: string | null }> {
+    this.storageReady = await this.store.open();
+    if (!this.storageReady) {
+      return { loaded: 0, dropped: 0, error: this.store.stats().reason };
+    }
+
+    const raw = await this.store.load();
+    if (raw === null) return { loaded: 0, dropped: 0, error: null };
+
+    const result = restore(raw, this.measurer);
+    if (result.error !== null) return { loaded: 0, dropped: 0, error: result.error };
+
+    this.history.suppress(() => {
+      this.scene.load(result.elements);
+      this.viewport.restore(result.appState);
+    });
+
+    this.dirty.force('global');
+    this.needsStaticRender = true;
+    this.needsInteractiveRender = true;
+    this.refreshSnapshot();
+
+    return { loaded: result.elements.length, dropped: result.dropped, error: null };
+  }
+
+  /** Write now, skipping the debounce. Wired to `pagehide`. */
+  async flushDocument(): Promise<void> {
+    if (!this.storageReady) return;
+    this.store.schedule(this.currentDocument());
+    await this.store.flush();
+  }
+
+  get storageStats(): StorageStats {
+    return this.store.stats();
+  }
+
+  private scheduleSave(): void {
+    if (!this.storageReady) return;
+    /* The document object is built here, not inside the store, and that is a
+       deliberate cost: it means the ~25 MB structured clone at 50,000 elements
+       happens once per *save*, not once per change. `schedule` replaces whatever
+       was queued, so a hundred keystrokes produce one write of the final state. */
+    this.store.schedule(this.currentDocument());
+  }
+
+  private currentDocument(): unknown {
+    return serialize(this.scene.sorted(), this.appState());
+  }
+
+  private appState(): StoredAppState {
+    const vp = this.viewport.get();
+    return { scrollX: vp.scrollX, scrollY: vp.scrollY, zoom: vp.zoom };
+  }
+
   /* ── channel 2: per-frame numbers, bypassing React ──────────────────────── */
 
   addFrameListener(listener: (info: FrameInfo) => void): () => void {
@@ -932,6 +1128,8 @@ export class Engine {
       dirty: this.dirty.stats(),
       hit: this.scene.hitStats,
       idleFrames: this.idleFrames,
+      history: this.history.stats(),
+      storage: this.store.stats(),
     };
     for (const l of this.frameListeners) l(info);
   }

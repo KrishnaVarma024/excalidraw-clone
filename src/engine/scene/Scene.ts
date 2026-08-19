@@ -42,6 +42,25 @@ export interface SceneChange {
   readonly before: Bounds | null;
   /** Pixels it can touch *after*. Null when it was removed from the scene. */
   readonly after: Bounds | null;
+  /**
+   * The element objects themselves, before and after. Null when it did not
+   * exist.
+   *
+   * ── Why references and not copies ───────────────────────────────────────
+   *
+   * `mutate` never edits an element in place; it builds a new object. So the
+   * "before" object is still intact, still immutable in practice, and handing out
+   * a reference to it costs nothing. Phase 8's history stores these references
+   * directly — a 400-point freehand stroke dragged for three seconds produces
+   * ~180 objects, and history keeps exactly two of them while the other 178 are
+   * collected.
+   *
+   * That is the third feature bought by one rule from Phase 2 — *one mutator,
+   * always a new object* — after the Rough drawable cache and the memoised render
+   * bounds. Structural sharing for free, with no copy-on-write machinery.
+   */
+  readonly beforeElement: Element | null;
+  readonly afterElement: Element | null;
 }
 
 export type SceneListener = (change: SceneChange) => void;
@@ -463,7 +482,13 @@ export class Scene {
       this.index.insert(element.id, bounds);
       this.growContentBounds(bounds);
     }
-    this.emit({ id: element.id, before: null, after: bounds });
+    this.emit({
+      id: element.id,
+      before: null,
+      after: bounds,
+      beforeElement: null,
+      afterElement: element,
+    });
   }
 
   /**
@@ -540,7 +565,13 @@ export class Scene {
     else if (isLive) this.index.insert(id, afterBounds); // undeleted
     if (isLive) this.growContentBounds(afterBounds);
 
-    this.emit({ id, before: beforeBounds, after: isLive ? afterBounds : null });
+    this.emit({
+      id,
+      before: beforeBounds,
+      after: isLive ? afterBounds : null,
+      beforeElement: current,
+      afterElement: updated,
+    });
     return true;
   }
 
@@ -592,7 +623,10 @@ export class Scene {
       }
     }
     this.invalidateSorted();
-    this.emit({ id: '', before: null, after: null });
+    /* A whole-scene replacement, not a change to one element. Consumers detect it
+       by the empty id: the dirty tracker forces a full repaint and the history
+       clears its stacks, because there is no meaningful "before" to undo to. */
+    this.emit({ id: '', before: null, after: null, beforeElement: null, afterElement: null });
   }
 
   /* ── notification ───────────────────────────────────────────────────────── */

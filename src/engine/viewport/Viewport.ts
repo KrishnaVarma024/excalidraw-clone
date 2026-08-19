@@ -16,6 +16,7 @@ import {
   type Matrix2D,
   type ViewportState,
   buildDeviceMatrix,
+  clampZoom,
   fitToBounds,
   getVisibleSceneBounds,
   panByScreenDelta,
@@ -109,6 +110,22 @@ export class Viewport {
 
   reset(): boolean {
     return this.set(DEFAULT_VIEWPORT);
+  }
+
+  /**
+   * Restore a saved viewport wholesale.
+   *
+   * For loading a document (Phase 8) — the only caller that has a full state
+   * rather than a gesture. It goes through the same `set` as everything else, so
+   * the clamping and the no-op check apply: a saved zoom of 0 or 10^6 cannot get
+   * in this way any more than a wheel event could.
+   */
+  restore(state: { scrollX: number; scrollY: number; zoom: number }): boolean {
+    return this.set({
+      scrollX: state.scrollX,
+      scrollY: state.scrollY,
+      zoom: clampZoom(state.zoom),
+    });
   }
 
   /** Zoom to 100% about the canvas centre, preserving what is under the centre. */

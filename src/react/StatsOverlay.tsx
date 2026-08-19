@@ -59,6 +59,8 @@ export function StatsOverlay({ engine }: Props) {
   const nodes = useRef<HTMLSpanElement>(null);
   const path = useRef<HTMLSpanElement>(null);
   const hit = useRef<HTMLSpanElement>(null);
+  const undoDepth = useRef<HTMLSpanElement>(null);
+  const saved = useRef<HTMLSpanElement>(null);
   const dirty = useRef<HTMLSpanElement>(null);
   const coverage = useRef<HTMLSpanElement>(null);
   const fulls = useRef<HTMLSpanElement>(null);
@@ -106,6 +108,16 @@ export function StatsOverlay({ engine }: Props) {
       // the fraction of the screen actually repainted. `full repaints` should
       // spike during a pan and sit still while drawing — if it climbs while you
       // draw one shape, something is forcing global invalidation that shouldn't.
+      write(undoDepth.current, `${info.history.undoDepth} / ${info.history.redoDepth}`);
+      /* The number this phase is judged on. At 50,000 elements the structured
+         clone alone is ~390 ms, so this is where you see whether pushing the save
+         into idle time actually kept it out of the interaction. */
+      write(
+        saved.current,
+        info.storage.available
+          ? `${info.storage.lastSaveMs.toFixed(1)} ms${info.storage.pending ? ' (pending)' : ''}`
+          : 'off',
+      );
       write(dirty.current, info.render.fullRepaint ? 'full' : String(info.render.dirtyRects));
       write(coverage.current, `${(info.render.dirtyCoverage * 100).toFixed(1)}%`);
       write(
@@ -148,6 +160,8 @@ export function StatsOverlay({ engine }: Props) {
       <Row label="cache hit" spanRef={cache} />
       <Row label="grid lines" spanRef={grid} />
       <Row label="idle frames" spanRef={idle} />
+      <Row label="undo/redo" spanRef={undoDepth} />
+      <Row label="last save" spanRef={saved} />
 
       {/* Grouped under a header carrying the unit, so the four numbers line up
           and the labels stay distinct from the counters above — `draw` the
