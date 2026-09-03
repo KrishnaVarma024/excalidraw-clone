@@ -1145,41 +1145,141 @@ grows forever as the user deletes things.
 
 ## 9. Export
 
-Export is **not** a screenshot of the canvas. `canvas.toBlob()` on the live canvas captures the
-current viewport at current zoom, with selection handles in it. Wrong on three counts.
+Export is **not** a screenshot. `canvas.toBlob()` on the live canvas captures the current viewport,
+at the current zoom, with the selection handles in it. Wrong on three counts, and the third is the
+one that ships: nobody notices the handles until a user puts the image in a slide deck.
 
-Correct pipeline:
+An export has its own viewport, unrelated to the screen's — it frames the *content*, at a scale the
+caller chose, with nothing on top. Measured: a drawing on a 1200×760 screen exports as 396×251.
+
+### 9.1 The claim from Phase 2, cashed
+
+`drawElement.ts` has carried this since it was written:
+
+> It is also what will let Phase 9 reuse this exact code to render an export at a different scale to
+> an offscreen canvas, with no changes. If export ever needs to modify this file, that is a signal
+> something in here is reading screen state it should not be.
+
+**It did not need to be modified.** `git diff` on `drawElement.ts` and `roughCache.ts` across the
+export PR is empty. The whole PNG exporter is:
 
 ```ts
-async function exportToPng(scene, opts: { scale: 1|2|3; padding: number; background: boolean }) {
-  const visible = scene.all().filter(e => !e.isDeleted);
-  const bbox = padBounds(unionBounds(visible.map(getRenderBounds)), opts.padding);
-
-  const c = new OffscreenCanvas(
-    Math.ceil(bbox.width  * opts.scale),
-    Math.ceil(bbox.height * opts.scale),
-  );
-  const ctx = c.getContext('2d')!;
-
-  await document.fonts.ready;              // ← or text renders in the fallback font
-
-  if (opts.background) { ctx.fillStyle = bg; ctx.fillRect(0, 0, c.width, c.height); }
-
-  // A FRESH transform — export has its own viewport, unrelated to the screen's.
-  ctx.setTransform(opts.scale, 0, 0, opts.scale, -bbox.minX * opts.scale, -bbox.minY * opts.scale);
-
-  for (const el of visible.sort(byZAsc)) drawElement(ctx, el);  // no dirty rects, no handles
-
-  return c.convertToBlob({ type: 'image/png' });
-}
+ctx.setTransform(...exportMatrix(bounds, scale));   // a FRESH transform
+for (const el of sorted) drawElement(ctx, rc, cache, el);
 ```
 
-Gotchas: `document.fonts.ready` (text silently falls back otherwise); `toBlob` is async and
-`toDataURL` will blow the string length limit on big exports; browsers cap canvas dimensions
-(~16,384 px on Safari, ~65,535 on Chrome) so clamp `scale` against `bbox`.
+`drawElement` was never allowed to read `zoom`, `scroll` or `devicePixelRatio`. It reads six numbers
+off a 2D context and does not care where they came from. Seven phases later a caller with a
+completely different idea of what those numbers mean gets the same drawing for free.
 
-SVG export reuses the same geometry code but emits `<path>` elements — Rough.js exposes the same
-`Drawable` ops for both, which is exactly why we keep drawing logic separate from the 2D context.
+### 9.2 What is pure, and why that is most of the phase
+
+| module | needs a canvas? | tested where |
+|---|---|---|
+| `export/bounds.ts` — framing, browser caps | no | Node |
+| `export/svg.ts` — the whole serialiser | no (`rough.generator()` needs no DOM) | Node |
+| `export/png.ts` | yes | browser |
+
+Same move as §7.4.1's `TextMeasurer`: push the untestable thing to the edge until what is left is
+arithmetic. What remains in `png.ts` is a loop.
+
+### 9.3 The browser's canvas caps
+
+Browsers cap canvas dimensions and **do not tell you**. `getContext` succeeds, drawing succeeds, and
+`toBlob` hands back a blank image or null. No exception, no console warning.
+
+Two limits, and both must be applied:
+
+| | value used | why |
+|---|---|---|
+| per side | 16,384 px | covers desktop Chrome, Firefox and Safari. It does **not** cover iOS, documented at 4,096 |
+| total area | 268,435,456 px | the one people miss — 20,000 × 15,000 is legal on both axes and still refused |
+
+Sides first, then area, because the area fix is a square root and applying it first can still leave a
+side over the cap on a long thin drawing. Then ceil, then re-clamp: rounding up can push a dimension
+one pixel past the cap when the scale lands exactly on it, and a one-pixel overflow still produces a
+blank image.
+
+The per-side number is a compromise, stated rather than hidden: clamping everyone
+to iOS's 4,096 would cripple desktop exports to fix one platform, so `toPng`
+catches the null from `toBlob` and says *"try a smaller scale"* instead. Detecting
+the real limit means binary-searching canvas allocations at startup — which is
+what the `canvas-size` library does, and is more machinery than this earns.
+
+**Clamp, do not refuse.** The user asked for a picture of their drawing; a slightly smaller picture is
+almost always what they wanted, and an error leaves them guessing which number to change. The UI
+shows the resulting dimensions *before* the button is pressed, so `3× → 16384 × 16205 (capped)` is an
+informed choice rather than a surprise.
+
+### 9.4 SVG needs a second renderer, and does not duplicate one
+
+There is no 2D context to install a transform on, so SVG cannot reuse `drawElement`. That would mean
+two renderers drifting apart — a drawing that looks different depending on which button you pressed —
+except that **Rough.js hands out the geometry, not just the drawing**.
+
+`generator.toPaths(drawable)` returns the same sketchy path data the canvas renderer strokes, as SVG
+`d` strings. Both exporters consume the *same* `Drawable`, generated from the *same* stored `seed`.
+The duplication that remains is confined to "how do I put a path on the page", which is the part that
+genuinely differs between the formats.
+
+This is why `roughCache.ts` was built to hand out `Drawable`s rather than to draw. At the time it
+looked like an over-abstraction with one caller.
+
+### 9.5 Byte-reproducibility, and what it cost to get
+
+Exporting the same scene twice produces the same bytes, because `seed` is stored on the element
+(§3.1) rather than regenerated. That is what makes Phase 10's visual-regression testing possible, and
+it is the reason the seed became a stored field three phases before anything used it.
+
+It needed one more thing that was not obvious: **rounding the path coordinates.** `toPaths` emits full
+float precision, seventeen characters per number, and two runs differing in the sixteenth decimal
+place would produce different bytes. Two decimals is well below a device pixel at any export scale —
+and more than halves the file:
+
+| elements | unrounded | rounded | |
+|---:|---:|---:|---:|
+| 100 | 124.7 kB | 60.2 kB | 2.07× |
+| 1,000 | 1,461.3 kB | 676.2 kB | 2.16× |
+
+### 9.6 Text in SVG: the trade, stated
+
+| | `<text>` | outlined paths |
+|---|---|---|
+| size | small | an order of magnitude larger |
+| selectable, searchable, editable | yes | no |
+| identical everywhere | **no** — renders in whatever font the viewer has | yes |
+
+v1 emits `<text>`, for a reason about this codebase rather than about SVG: converting glyphs to paths
+needs font outlines, and the Canvas 2D API does not expose them. Doing it properly means shipping a
+font parser and the font file — a dependency and a licensing question, in exchange for a fidelity
+nobody has asked for. The mitigation is §7.4.1's: emit the whole stack, ending in a generic family.
+
+The lines emitted are the ones already stored on the element. Re-wrapping here would need a measurer
+and could produce different breaks from the ones on screen — an export that does not match what the
+user was looking at.
+
+### 9.7 What it costs
+
+| elements | PNG 1× | PNG 2× | SVG |
+|---:|---|---|---|
+| 1,000 | 1.4 s · 2.13 MB | 5.7 s · 6.69 MB | 5.1 s · 0.66 MB |
+| 10,000 | 1.8 s · 9.46 MB | 6.6 s · 23.69 MB | 6.9 s · 6.68 MB |
+| 50,000 | 5.1 s · 34.50 MB | 14.1 s · 80.45 MB | 8.1 s · 33.53 MB |
+
+Export blocks the main thread for seconds, and unlike §8.4's autosave that cannot be moved into idle
+time — the user is waiting for it. v1 disables the button and shows a spinner; the real fix is an
+`OffscreenCanvas` in a worker, scoped out with the numbers attached.
+
+Note the shapes: **PNG scales with area, SVG with element count.** SVG is ten times smaller at a
+thousand elements and roughly level by fifty thousand.
+
+Two API details that are not stylistic:
+
+- **`toBlob`, not `toDataURL`.** `toDataURL` builds a base64 string on the main thread, ~33% larger
+  than the binary, and several browsers silently return `"data:,"` past an internal limit rather than
+  throwing.
+- **`await document.fonts.ready` before drawing.** On screen a wrong-font frame is transient; in an
+  export it is baked into a file the user sends to someone.
 
 ---
 

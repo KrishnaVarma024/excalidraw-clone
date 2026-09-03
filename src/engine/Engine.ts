@@ -51,6 +51,9 @@ import { Selection } from './tools/Selection';
 import { History, type HistoryStats } from './history/History';
 import { restore, serialize, type StoredAppState } from './persist/document';
 import { DocumentStore, type StorageStats } from './persist/storage';
+import { type ExportScale, type ExportSize, exportBounds, fitExportSize } from './export/bounds';
+import { downloadBlob, exportFilename, toPng } from './export/png';
+import { toSvg } from './export/svg';
 import {
   DEFAULT_FONT_FAMILY,
   DEFAULT_FONT_SIZE,
@@ -1102,6 +1105,59 @@ export class Engine {
   private appState(): StoredAppState {
     const vp = this.viewport.get();
     return { scrollX: vp.scrollX, scrollY: vp.scrollY, zoom: vp.zoom };
+  }
+
+
+  /* ── export ─────────────────────────────────────────────────────────────── */
+
+  /**
+   * What an export would contain: the whole scene, or just the selection.
+   *
+   * Selection-only export exists because the common real use is not "give me my
+   * whole board", it is "give me this diagram out of my board". Without it the
+   * user's workaround is to move everything else off screen, export, and undo —
+   * which people genuinely do.
+   */
+  private exportElements(selectionOnly: boolean): Element[] {
+    const all = this.scene.sorted();
+    if (!selectionOnly) return [...all];
+    return all.filter((el) => this.selection.has(el.id));
+  }
+
+  /** Dimensions an export would have, for the UI to show before committing. */
+  exportPreview(options: { selectionOnly: boolean; scale: number }): ExportSize | null {
+    const bounds = exportBounds(this.exportElements(options.selectionOnly));
+    if (bounds === null) return null;
+    return fitExportSize(bounds, options.scale);
+  }
+
+  async exportPng(options: {
+    scale: ExportScale;
+    background: boolean;
+    selectionOnly: boolean;
+  }): Promise<ExportSize | null> {
+    const result = await toPng(this.exportElements(options.selectionOnly), {
+      scale: options.scale,
+      background: options.background ? this.renderer.currentTheme.background : null,
+    });
+    if (result === null) return null;
+
+    downloadBlob(result.blob, exportFilename('png'));
+    return result.size;
+  }
+
+  exportSvg(options: { background: boolean; selectionOnly: boolean }): boolean {
+    const svg = toSvg(this.exportElements(options.selectionOnly), {
+      background: options.background ? this.renderer.currentTheme.background : null,
+    });
+    if (svg === null) return false;
+
+    /* `image/svg+xml` with an explicit UTF-8 charset. Without the charset, a
+       drawing containing anything outside ASCII — an em dash, an accented name,
+       an emoji — opens as mojibake in some viewers, and the file itself is
+       perfectly correct. */
+    downloadBlob(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }), exportFilename('svg'));
+    return true;
   }
 
   /* ── channel 2: per-frame numbers, bypassing React ──────────────────────── */

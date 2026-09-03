@@ -681,3 +681,98 @@ canvas {
     border-color: #6b4a1a;
   }
 }
+
+/* ── export panel ─────────────────────────────────────────────────────────────
+   Bottom edge, to the LEFT of the dev panel, and anchored by its bottom so it
+   grows upward when opened. Collapsed to a single button until asked for:
+   export is a deliberate action, not something you reach for mid-gesture, so it
+   does not need to occupy the screen while you draw.
+
+   The 232px offset clears the dev panel, which starts at x = 976 on a 1200px
+   viewport. My first attempt put this above the dev panel at `bottom: 220px` and
+   it landed on top of it — the browser test found that immediately, by failing
+   to click a button that was visibly there. */
+.export-panel {
+  position: absolute;
+  right: 232px;
+  bottom: 16px;
+  z-index: 2;
+}
+
+.export-toggle,
+.export-open {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  color: var(--fg);
+}
+
+.export-toggle {
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.export-toggle:hover {
+  background: rgba(127, 127, 140, 0.14);
+}
+
+.export-open {
+  width: 200px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.export-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+}
+
+.export-header button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.export-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.export-check input:disabled + span {
+  opacity: 0.4;
+}
+
+.export-row {
+  display: flex;
+  gap: 4px;
+}
+
+.export-row .seg {
+  flex: 1;
+}
+
+/* The number that turns "3×" into a decision, and the only place the browser's
+   canvas cap becomes visible before it bites. */
+.export-size {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.export-message {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(127, 127, 140, 0.14);
+  line-height: 1.4;
+}

@@ -260,6 +260,11 @@ export class Renderer {
    *
    * A single id rather than a set, because there is exactly one caret.
    */
+  /** The current theme. Read by export, which needs the background colour. */
+  get currentTheme(): Theme {
+    return this.theme;
+  }
+
   setHidden(id: ElementId | null): void {
     this.hidden = id;
   }
