@@ -252,7 +252,7 @@ tests/bench/       vitest bench. run on demand, never in CI.
 ```
 
 Directories arrive with the phase that fills them, rather than as empty placeholders. The target
-structure is in [ARCHITECTURE.md §12](ARCHITECTURE.md).
+structure is in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ---
 
