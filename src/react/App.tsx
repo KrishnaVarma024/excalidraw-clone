@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import type { Engine } from '@engine/Engine';
 import { CanvasHost } from './CanvasHost';
 import { DevPanel } from './DevPanel';
+import { ExportPanel } from './ExportPanel';
 import { HistoryControls } from './HistoryControls';
 import { TextEditor } from './TextEditor';
 import { SelectionBar } from './SelectionBar';
@@ -31,21 +32,23 @@ export function App() {
           <DevPanel engine={engine} />
           <SelectionBar engine={engine} />
           <HistoryControls engine={engine} />
+          <ExportPanel engine={engine} />
           <TextEditor engine={engine} />
         </>
       )}
 
       <div className="badge">
-        <strong>Phase 8 — undo, redo and persistence.</strong>
+        <strong>Phase 9 — PNG and SVG export.</strong>
         <br />
-        Draw something, drag it for three seconds, then press <em>⌘Z</em> once.
-        One gesture is one undo step, not one per frame — a three-second drag is
-        about 180 mutations and exactly one entry.
+        Export is not a screenshot: it frames the <em>content</em>, at a scale you
+        choose, with no handles and no grid. The PNG path reuses{' '}
+        <em>drawElement</em> with <strong>zero changes</strong> — a claim written
+        into that file in Phase 2 and only now cashed. It just installs a different
+        matrix.
         <br />
-        Reload the page. It is still there: the document autosaves to IndexedDB
-        after 1.2&nbsp;s of quiet, and flushes when the tab hides. Not
-        localStorage — a 50,000-element document is <em>24.7&nbsp;MB</em>, and the
-        quota is about five.
+        SVG cannot reuse it, so it emits paths — from the <em>same</em> Rough.js
+        drawable, generated from the <em>same</em> stored seed. Export twice and
+        the bytes are identical, which is what makes Phase 10 possible.
       </div>
     </div>
   );

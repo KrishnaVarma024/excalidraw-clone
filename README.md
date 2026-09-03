@@ -21,51 +21,48 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 8 of 11 — undo, redo and persistence.** Two features with one shared idea: **the element
-model was already the right shape for both, because of a rule set in Phase 2.**
+**Phase 9 of 11 — PNG and SVG export.** `drawElement.ts` has carried this comment since Phase 2:
 
-`Scene.mutate` never edits an element in place — it builds a new object and bumps `version`. So a
-history entry can hold *references* to the old and new objects rather than copies. A 400-point
-freehand stroke dragged for three seconds produces about 180 objects; history keeps exactly two of
-them and the other 178 are collected. Structural sharing with no copy-on-write machinery.
+> It is also what will let Phase 9 reuse this exact code to render an export at a different scale to
+> an offscreen canvas, with no changes. If export ever needs to modify this file, that is a signal
+> something in here is reading screen state it should not be.
 
-The rule that makes an entry a gesture rather than a frame is **first `before`, last `after`**. Get
-it wrong and reversing one drag takes 180 undos, which users report as "undo doesn't work".
+**It did not need to be modified. Not one line.** `git diff` on `drawElement.ts` and `roughCache.ts`
+across this PR is empty. The whole PNG exporter is: make a canvas, install a different matrix, call
+`drawElement` in z-order. That is the only kind of proof an architectural rule ever gets.
 
-### What autosave costs during a drag
+Export is **not** a screenshot. `canvas.toBlob()` on the live canvas gives you the current viewport,
+at the current zoom, with the selection handles in it. Measured in the browser: a drawing on a
+1200×760 screen exports as **396×251** — framed to the content, with no grid and no handles.
 
-50,000 elements, one shape dragged in a 150-step circle. Identical build, one line changed:
+SVG cannot reuse `drawElement` — there is no 2D context to install a transform on — so it needs a
+second renderer. That would mean two renderers drifting apart, except that **Rough.js hands out the
+geometry, not just the drawing**: `generator.toPaths()` returns the same sketchy path data the canvas
+strokes, from the same `Drawable`, generated from the same stored `seed`. Export the same scene twice
+and the bytes are identical, which is what makes Phase 10's visual-regression testing possible.
 
-| | debounced + idle | saved on every change | |
-|---|---:|---:|---:|
-| frame **p50** | **5.10 ms** | 123.10 ms | **24×** |
-| frame **p95** | **7.10 ms** | 165.20 ms | 23× |
-| wall clock, one drag | **7.5 s** | 28.2 s | 3.8× |
+### What an export costs, and what it weighs
 
-The save itself is not cheap and is not made cheap — it is moved. Serialising the document is
-~300 ms at 50,000 elements, and `requestIdleCallback` puts that in the gap *after* the gesture
-instead of inside it.
+| elements | PNG 1× | PNG 2× | SVG |
+|---:|---|---|---|
+| 1,000 | 1.4 s · 2.13 MB | 5.7 s · 6.69 MB | 5.1 s · **0.66 MB** |
+| 10,000 | 1.8 s · 9.46 MB | 6.6 s · 23.69 MB | 6.9 s · 6.68 MB |
+| 50,000 | 5.1 s · 34.50 MB | **14.1 s** · 80.45 MB | 8.1 s · 33.53 MB |
 
-### Why not localStorage
+Two things worth reading off that table. **Export blocks, in seconds** — and unlike Phase 8's
+autosave it cannot be hidden in idle time, because the user is waiting for it. And **PNG scales with
+area while SVG scales with element count**, so SVG is 10× smaller at a thousand elements and roughly
+level by fifty thousand.
 
-Measured on this project's own generated scenes:
+A bug a test found: **the path coordinates were never rounded.** `toPaths` emits full float
+precision — seventeen characters per number — and the rounding helper only reached numbers this code
+formatted itself. Rounding the `d` strings to two decimals (well under a device pixel at any export
+scale) more than halves the file, and it is also what makes the bytes *stable* enough to compare:
 
-| elements | document | `JSON.stringify` | `structuredClone` |
+| elements | unrounded SVG | rounded | |
 |---:|---:|---:|---:|
-| 1,000 | 0.50 MB | 3.2 ms | 3.8 ms |
-| 10,000 | 4.94 MB | 34.7 ms | 44.2 ms |
-| 50,000 | **24.69 MB** | 492.9 ms | 389.0 ms |
-
-localStorage's quota is about 5 MB, so a document outgrows it around **ten thousand elements** —
-and it fails by throwing on write, at the moment the user has done the most work. It is also
-synchronous. Note the last column too: storing the object graph in IndexedDB instead of a JSON
-string does not escape the serialisation cost, because the structured clone happens on the calling
-thread.
-
-A bug the browser test found and no unit test could have: **a pan or zoom scheduled no save.** The
-viewport is part of the saved document, but the only thing calling `scheduleSave` was the scene
-change feed — which fires when an *element* changes. Reopening a document dropped you back at 100%
-at the origin unless you happened to edit something afterwards.
+| 100 | 124.7 kB | **60.2 kB** | 2.07× |
+| 1,000 | 1,461.3 kB | **676.2 kB** | 2.16× |
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -81,7 +78,7 @@ at the origin unless you happened to edit something afterwards.
 | 6 | Move, resize, rotate, multi-select | ✅ |
 | 7 | Text | ✅ |
 | 8 | Undo/redo, persistence | ✅ |
-| 9 | PNG and SVG export | — |
+| 9 | PNG and SVG export | ✅ |
 | 10 | Hardening, benchmarks in CI, deploy | — |
 
 Each phase is a pull request with the design reasoning in its description.
@@ -179,6 +176,9 @@ pessimisation in the common path."* It then caught exactly that.
 | Frame p50 while dragging at 50k, autosave debounced vs eager | **5.10 ms vs 123.10 ms** (24×) |
 | Undo entries produced by a 180-mutation drag | **1** |
 | Document size at 50k elements | **24.69 MB** — past localStorage's quota by ~5× |
+| Lines changed in `drawElement.ts` to support export | **0** |
+| Export framing: 1200×760 window, same drawing | **396 × 251** — content, not viewport |
+| SVG size, path coordinates unrounded → rounded | **1,461 kB → 676 kB** (2.16×) |
 | Grid lines drawn, 10% zoom → 3000% zoom | 116 → 196 — near-constant across a 300× range |
 | Zoom-at-cursor drift over a 20× zoom | < 0.1 scene units |
 
@@ -243,10 +243,11 @@ src/
     text/          measurement and line breaking. takes a measurer, owns no canvas.
     history/       undo/redo. holds element references, never copies.
     persist/       the document format, and the IndexedDB store behind it.
+    export/        PNG and SVG. the geometry is pure, so most of it tests in Node.
     spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      484 tests, all in Node. ~9s, no jsdom.
+tests/engine/      516 tests, all in Node. ~9s, no jsdom.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 
