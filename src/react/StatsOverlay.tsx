@@ -67,6 +67,7 @@ export function StatsOverlay({ engine }: Props) {
   const cache = useRef<HTMLSpanElement>(null);
   const grid = useRef<HTMLSpanElement>(null);
   const idle = useRef<HTMLSpanElement>(null);
+  const quarantined = useRef<HTMLSpanElement>(null);
 
   // One ref per stage, created once. `Record<StageName, …>` rather than an
   // index signature, so adding a stage to the union is a compile error here
@@ -127,6 +128,13 @@ export function StatsOverlay({ engine }: Props) {
       write(cache.current, `${(info.render.cacheHitRate * 100).toFixed(0)}%`);
       write(grid.current, String(info.render.gridLines));
       write(idle.current, String(info.idleFrames));
+      /* Reads "—" in every healthy build, which is the point: the moment it
+         reads a number, the user's "my shape vanished" has an explanation that
+         does not require a debugger. A dash rather than 0 so the eye skips it. */
+      write(
+        quarantined.current,
+        info.render.quarantined === 0 ? '—' : String(info.render.quarantined),
+      );
 
       // No unit suffix here — the section header carries it, which keeps four
       // numbers vertically aligned and the panel narrow.
@@ -160,6 +168,7 @@ export function StatsOverlay({ engine }: Props) {
       <Row label="cache hit" spanRef={cache} />
       <Row label="grid lines" spanRef={grid} />
       <Row label="idle frames" spanRef={idle} />
+      <Row label="quarantined" spanRef={quarantined} />
       <Row label="undo/redo" spanRef={undoDepth} />
       <Row label="last save" spanRef={saved} />
 
