@@ -4,12 +4,29 @@
 # claim get promoted into README.md; the working notes stay here.
 _learning/
 
+# ── Desktop app scratch ──────────────────────────────────────────────────────
+# Where the Claude desktop app saves files it hands over. Two copies of the CI
+# workflows landed here and got committed — harmless, but a second copy of a
+# config file is worse than none: someone eventually edits the wrong one.
+Claude outputs/
+
 # ── Dependencies & build output ──────────────────────────────────────────────
 node_modules/
 dist/
 dist-ssr/
 coverage/
 *.local
+
+# ── Playwright ───────────────────────────────────────────────────────────────
+# Traces, screenshots and the HTML report, written only when a test fails.
+# Ignored because they are large binary artefacts of ONE run on ONE machine —
+# CI uploads them as an artifact instead, which is where a failing run's
+# evidence belongs. Note that e2e/ itself and the golden SVGs in
+# tests/visual/__golden__/ are NOT ignored: those are source.
+test-results/
+playwright-report/
+blob-report/
+.playwright/
 
 # ── Tooling caches ───────────────────────────────────────────────────────────
 .vite/

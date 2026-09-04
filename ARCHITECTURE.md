@@ -1345,6 +1345,148 @@ debug the wrong thing.
 
 ---
 
+### 10.2 Turning the claims into gates
+
+Phase 10. The measurement discipline of §10.1 was a habit; this is the part that survives the person
+who had the habit.
+
+#### 10.2.1 Why the budget asserts equality and the bundle asserts a ceiling
+
+Both are budgets. They use opposite assertions, and the reason is a property of the *quantity*, not a
+matter of taste.
+
+`tests/budget/budget.json` records mostly counts — elements the cull examined, quadtree nodes
+descended, dirty rectangles merged. 43 of the 45 are pure functions of this repository's code and a
+fixed seed: same input, same integer, on any machine, forever. When a quantity is deterministic,
+`toEqual` strictly dominates `toBeLessThan`:
+
+- a ceiling is **silent about improvements**, so a 40% win is never recorded and the budget drifts
+  upward until it constrains nothing;
+- a ceiling has to be *chosen*, and the honest choice is "current plus some slack", which is a number
+  nobody can defend in review;
+- a ceiling **cannot fail on a change that makes a number smaller** — and "the cull now returns 200
+  elements where it returned 4,000" is a bug, not a win.
+
+The cost is real: the file fails on intentional changes too. That is the trade, and it is the point.
+Every change to the work this engine does becomes a line in a diff somebody has to justify.
+
+**The two exceptions, and why they are instructive.** `bytes.document.*` measures the byte size of
+serialised floating-point data, not a count of operations. It drifted 21 bytes in 461 kB between an
+x86-64 Linux container and an arm64 macOS laptop — a double-to-string conversion's last digits are
+not stable across V8 builds. It had been asserted exactly, because it lived in this file and looked
+like everything else in it.
+
+That is the same mistake as using one assertion style everywhere, made one level down: **grouping
+quantities by where they live rather than by how they behave.** Those keys now carry a ±0.1%
+relative tolerance with the reason recorded beside it. A tolerance is only defensible when both
+numbers can be stated and the gap shown — noise 0.005%, signal (one field added to the element
+model) 3.2%, a factor of ~600 — and it is verified by adding a field and watching exactly those two
+keys fail.
+
+`bytes.svg.*` remained exact, because §9 rounds path coordinates to two decimals before serialising.
+The rounding that halved the export file also made it machine-independent. Nobody planned that, and
+it is the second time in two phases that a decision taken for one reason paid out somewhere else.
+
+`scripts/checkBundle.mjs` measures brotli-compressed bytes of `dist/`. Those move when a dependency
+ships a patch release or a minifier changes a heuristic — reasons that are not about this code. An
+exact assertion there would fail for things outside the author's control, and **a gate that fails for
+reasons you cannot act on is a gate people learn to ignore.** So: a ceiling, recorded with 10%
+headroom at record time rather than a tolerance applied silently at check time, plus the half most
+size gates omit — a complaint when you are *far under*, because a one-way ratchet stops constraining
+anything the moment someone lands a big win.
+
+Two smaller decisions in there, both learned by getting them wrong first:
+
+- Ceilings round up to a whole kB, so a 2.3 kB stylesheet gets a 3 kB ceiling and sits at 75% by
+  arithmetic. The "you have too much slack" notice therefore requires an absolute gap as well as a
+  ratio. **A warning that fires on quantisation noise trains people to ignore warnings.**
+- Brotli, not raw bytes. Every host serves this compressed, so 40 kB of repetitive code and 40 kB of
+  entropy cost the user completely different amounts. Budgeting raw bytes budgets a number nobody
+  experiences.
+
+#### 10.2.2 Visual regression without a browser
+
+`toSvg` (§9.4) is deterministic and DOM-free: same elements, same stored seeds, same string. That
+makes the golden file *the SVG itself* — text, exact, diffable, identical on every machine, running
+inside the normal Node test run in 24 ms.
+
+What this buys is precision that screenshot testing cannot reach. Pixel comparison needs a tolerance
+to survive font hinting and GPU antialiasing across machines, and a tolerance wide enough for that is
+usually wide enough to swallow a real regression. Here there is no tolerance at all.
+
+What it does **not** cover, stated plainly: the SVG and canvas renderers share the Rough.js
+`Drawable`, so geometry changes move both — but they are still two emitters. A canvas-only bug (a
+wrong `globalAlpha`, a missing `setLineDash`) is invisible to this file. That is what `e2e/` is for.
+Two gates, two failure classes; claiming one covers the other is how a suite ends up green over a
+broken build.
+
+The goldens are stored one element per line, which `toSvg` never emits. The storage format is chosen
+for the reviewer, not for the product: on one line, changing a stroke width rewrites the whole 24 kB
+line and git reports "1 insertion, 1 deletion".
+
+#### 10.2.3 Two containment boundaries, because React only guards one
+
+An error boundary catches throws during render, in lifecycle methods and in constructors. It does not
+catch them in event handlers, in promises, or in `requestAnimationFrame` callbacks.
+
+The render loop is a rAF callback. **Nothing React offers can catch a throw inside it.** So:
+
+| | `ErrorBoundary` | `DrawGuard` |
+|---|---|---|
+| Guards | the React tree | the per-element draw loop |
+| Fires on | a render throw | `drawElement` throwing |
+| Blast radius without it | white page, work apparently gone | blank canvas, every frame, forever |
+| Recovery | offers the last autosave as a file | skips that element, draws the rest |
+
+`DrawGuard` quarantines on the **first** failure, not after a threshold. A threshold is the tempting
+design and it is wrong at 60 Hz: "two strikes" means 120 exceptions per second, each allocating a
+stack trace, and there is no transient to ride out — the same element with the same data fails the
+same way next frame, deterministically.
+
+The quarantine key is `id:version`, the same key `RoughCache` uses. That is not a coincidence, it is
+§3.1's "never mutate in place" invariant paying out a third time: any edit bumps the version, so the
+key changes and the element is retried automatically. The retry policy is *"whenever the element
+changes"* — exactly right, and it costs one string concatenation. The alternative, quarantine by `id`
+plus a manual retry button, needs UI, needs the user to know what a quarantine is, and would still be
+wrong after an undo.
+
+Cost, measured rather than assumed — continuous pan at 10,000 elements, full repaint every frame:
+**+2.2 ms on a 61 ms frame (3.6%), 95% CI ±2.1 ms, n=8 per arm.** Barely separable from zero. The
+obvious hypothesis was the closure allocated per element per frame; a closure-free variant measured
+63.7 ms against the closure version's 63.2 ms, so the hypothesis was **wrong** and the generic,
+testable API stays.
+
+`rescueDocument` lives in `src/engine/persist/rescue.ts`, not in the component, for two reasons. It
+is testable there — the loader is a parameter, the same seam as §7's `TextMeasurer` — and it is the
+one piece of logic whose entire purpose is running *after* a crash, which is a poor argument for
+housing it inside the thing that crashed. It deliberately does **not** run `restore()` over the
+document first: `restore` drops what it cannot parse, and a corrupt document is a likely reason the
+app crashed. Silently deleting the damaged part of the file the user is trying to salvage is the one
+thing a rescue must never do.
+
+#### 10.2.4 What the pipeline gates, and where it does not
+
+Two CI jobs in parallel. `verify` — typecheck, lint, 590 tests, build, bundle size — is the one people
+watch, so nothing slow is allowed into it. `e2e` installs a browser and drives the **production
+bundle** via `vite preview`, because `import.meta.env.DEV` being false is exactly where integration
+bugs hide. Deploy is a third workflow gated on CI success, with its own narrower permissions, so a
+change to the test pipeline cannot grant itself deploy rights.
+
+`retries: 0`, and it paid for itself on the first full run. Two of five specs raced the render loop —
+failing in a *different* place each time, passing in isolation. A retry would have converted that
+into a green build over a test suite that was measuring the machine. Both were bugs in the tests:
+reading canvas pixels before the next animation frame, and inferring "the save landed" from a UI
+label that reads `0.0 ms (pending)` while it has not. The second is the more general lesson —
+**assert the condition, not a rendering of it**; the test now reads the object store directly.
+
+The honest gap: `ErrorBoundary`'s render path has no automated test. Covering it needs a component
+that throws, which needs either jsdom (§12 calls that a smell here) or a crash-trigger shipped in the
+production bundle. Neither earns its cost, so the risky half was extracted and unit-tested and the
+boundary itself was verified by hand against a real build. Closing it properly means a build-time
+flag and a second CI build, and that is written down rather than pretended away.
+
+---
+
 ## 11. End-to-end trace: what happens when you drag a rectangle
 
 This is the walkthrough to have ready when a senior dev asks "so how does it work?"
@@ -1402,69 +1544,95 @@ point of the architecture, and it's the sentence to say out loud in an interview
 
 ## 12. File tree
 
+The **actual** tree, at the end of Phase 10. Earlier revisions of this section carried the Phase 0
+*plan*, which had drifted: it named `SpatialIndex.ts`, `interactiveLayer.ts` and `localStore.ts`,
+none of which were ever built under those names. A file tree that disagrees with the repository is
+worse than no file tree — it is a map that sends people to the wrong room, and it erodes trust in
+every other claim in the document. Corrected here as part of the final pass.
+
 ```
 excalidraw-clone/
+├─ .github/workflows/
+│  ├─ ci.yml                        ← verify + e2e, in parallel
+│  └─ deploy.yml                    ← Pages, gated on CI success, narrower permissions
 ├─ index.html
-├─ package.json
-├─ tsconfig.json
-├─ vite.config.ts
-├─ vitest.config.ts
+├─ package.json  tsconfig.json  eslint.config.js
+├─ vite.config.ts                   ← also holds the vitest config (test.environment: 'node')
+├─ playwright.config.ts             ← e2e against `vite preview`, not the dev server
 ├─ README.md                        ← benchmarks + design decisions. Recruiters read this.
 ├─ ARCHITECTURE.md                  ← this file
 │
 ├─ src/
-│  ├─ main.tsx
-│  ├─ App.tsx
+│  ├─ main.tsx                      ← mounts <ErrorBoundary><App/></ErrorBoundary>
 │  │
 │  ├─ engine/                       ★ ZERO React imports. Runs in Node. This is the project.
 │  │  ├─ Engine.ts                  ← orchestrator; owns the rAF loop; the only public API
 │  │  │
 │  │  ├─ scene/
 │  │  │  ├─ element.types.ts        ← the discriminated union
-│  │  │  ├─ elementFactory.ts       ← newRectangle(), newFreedraw(), ... + seed generation
+│  │  │  ├─ elementFactory.ts       ← newRectangle(), newFreedraw(), newText(), relayoutText()
 │  │  │  ├─ Scene.ts                ← store, mutate(), z-order, selection, soft delete
-│  │  │  └─ bounds.ts               ← getGeometryBounds / getRenderBounds / rotatedAABB
+│  │  │  ├─ bounds.ts               ← getGeometryBounds / getRenderBounds (memoised on identity)
+│  │  │  ├─ hitTest.ts              ← narrow phase, per element type
+│  │  │  └─ transform.ts            ← move / resize / rotate, always from a snapshot
 │  │  │
-│  │  ├─ spatial/
-│  │  │  ├─ QuadTree.ts             ← insert / remove / query / subdivide
-│  │  │  ├─ SpatialIndex.ts         ← facade + re-rooting for the infinite canvas
-│  │  │  └─ hitTest.ts              ← narrow phase, per element type
+│  │  ├─ spatial/QuadTree.ts        ← insert / remove / query / subdivide / re-root
 │  │  │
 │  │  ├─ viewport/
-│  │  │  ├─ Viewport.ts             ← scrollX/scrollY/zoom, pan, zoomAtPoint, fitToContent
-│  │  │  └─ transform.ts            ← pure fns: toScene, toScreen, toDevice, matrix build
+│  │  │  ├─ Viewport.ts             ← scroll, zoom, DPR; the only owner of screen state
+│  │  │  └─ transform.ts            ← pure: toScene, toScreen, matrix build
 │  │  │
 │  │  ├─ render/
-│  │  │  ├─ Renderer.ts             ← the dirty-rect frame loop
-│  │  │  ├─ DirtyTracker.ts         ← add / merge / flush / shouldFullRepaint
-│  │  │  ├─ drawElement.ts          ← switch on el.type
-│  │  │  ├─ roughCache.ts           ← Map<`${id}:${version}`, Drawable> + eviction
-│  │  │  └─ interactiveLayer.ts     ← selection box, handles, marquee, in-progress shape
+│  │  │  ├─ Renderer.ts             ← the static layer; full and partial repaint paths
+│  │  │  ├─ InteractiveRenderer.ts  ← selection box, handles, marquee, in-progress shape
+│  │  │  ├─ DirtyTracker.ts         ← collect / merge / plan, and the full-repaint escape hatch
+│  │  │  ├─ drawElement.ts          ← switch on el.type. NEVER reads zoom/scroll/DPR (§9.1)
+│  │  │  ├─ roughCache.ts           ← Map<`${id}:${version}`, Drawable>
+│  │  │  ├─ DrawGuard.ts            ← §10.2.3 quarantine, keyed the same way as roughCache
+│  │  │  └─ grid.ts                 ← LOD grid
 │  │  │
-│  │  ├─ tools/
-│  │  │  ├─ ToolManager.ts          ← the FSM
-│  │  │  ├─ SelectionTool.ts        ├─ ShapeTool.ts
-│  │  │  ├─ FreedrawTool.ts         └─ TextTool.ts
-│  │  │
-│  │  ├─ history/History.ts
-│  │  ├─ export/{exportToPng.ts,exportToSvg.ts}
-│  │  ├─ storage/localStore.ts
-│  │  └─ util/{math.ts,geometry.ts,perf.ts,id.ts}
+│  │  ├─ input/InputRouter.ts       ← pointer events → tool FSM, with coalesced events
+│  │  ├─ tools/{ToolManager.ts,Selection.ts}
+│  │  ├─ text/{measure.ts,wrap.ts}  ← measurement is an INPUT (§7), so both test in Node
+│  │  ├─ history/History.ts         ← element snapshots holding references, never copies
+│  │  ├─ persist/
+│  │  │  ├─ document.ts             ← serialize / restore, with hostile-input hardening
+│  │  │  ├─ storage.ts              ← IndexedDB, debounced, deferred to idle time
+│  │  │  └─ rescue.ts               ← §10.2.3 — takes a loader, so it tests without a browser
+│  │  ├─ export/{bounds.ts,png.ts,svg.ts}
+│  │  ├─ dev/generateScene.ts       ← seeded load generator. deterministic where it matters (§10.1)
+│  │  └─ util/{math.ts,geometry.ts,perf.ts,id.ts,simplify.ts}
 │  │
 │  ├─ react/                        ★ chrome only. Knows nothing about rendering.
 │  │  ├─ CanvasHost.tsx             ← mounts both canvases, creates Engine, wires ResizeObserver
+│  │  ├─ ErrorBoundary.tsx          ← catches render throws; rescues the document
 │  │  ├─ useEngineState.ts          ← useSyncExternalStore bridge — THE seam
-│  │  ├─ Toolbar.tsx  StylePanel.tsx  ZoomControls.tsx  StatsOverlay.tsx
-│  │  └─ TextEditorOverlay.tsx      ← a real <textarea> positioned over the canvas
+│  │  ├─ StatsOverlay.tsx           ← the OTHER seam: frame listener → textContent, no re-render
+│  │  ├─ TextEditor.tsx             ← a real <textarea> positioned over the canvas
+│  │  └─ App.tsx  Toolbar.tsx  StylePanel.tsx  ZoomControls.tsx  DevPanel.tsx
+│  │     SelectionBar.tsx  HistoryControls.tsx  ExportPanel.tsx
 │  │
-│  └─ styles/
+│  └─ styles/global.css
 │
-├─ tests/                           ← engine is pure TS, so these run in Node, fast
-│  ├─ transform.test.ts             quadtree.test.ts    reroot.test.ts
-│  ├─ dirtyTracker.test.ts          hitTest.test.ts     history.test.ts
-│  └─ bench/scene.bench.ts          ← generate 10k/50k elements, assert frame budget
+├─ tests/                           ← engine is pure TS, so these run in Node. no jsdom.
+│  ├─ engine/                       ← 24 files. includes boundary.test.ts, the fitness test
+│  │                                  that fails the build if src/engine/ imports React
+│  ├─ budget/
+│  │  ├─ scenarios.ts               ← the workloads, shared by the test and the regenerator
+│  │  ├─ measure.ts                 ← every claim, reduced to a number
+│  │  ├─ budget.json                ← 45 checked-in counts. UPDATE_BUDGET=1 to re-record
+│  │  └─ budget.test.ts             ← exact equality, one assertion per key
+│  ├─ visual/
+│  │  ├─ golden.test.ts             ← UPDATE_GOLDEN=1 to re-record
+│  │  └─ __golden__/*.svg           ← deterministic renderings. text, diffable, no browser
+│  └─ bench/*.bench.ts              ← vitest bench. run on demand, never in CI (§10.1)
 │
-└─ .gitignore                       ← ignores _learning/ (your notes never hit GitHub)
+├─ e2e/smoke.spec.ts                ← five specs: mount, pointer, reload, download, undo
+├─ scripts/
+│  ├─ checkBundle.mjs               ← brotli budget with headroom
+│  └─ bundle-budget.json
+│
+└─ .gitignore                       ← ignores _learning/ (study notes never hit GitHub)
 ```
 
 ---
@@ -1487,6 +1655,11 @@ seniority sounds like.
 | Undo | per-element snapshots | full-scene snapshots / command pattern | bounded memory without inverse-op complexity |
 | Z-order | numeric `zIndex` | array position | reorder doesn't invalidate the index (fractional indexing noted as v2) |
 | Tile cache | **not** in v1 | offscreen tile pyramid | unmeasured; ship dirty rects, then decide with data |
+| Perf gate | exact work COUNTS | timing thresholds | deterministic on any machine; separates algorithmic from constant-factor |
+| Size gate | brotli ceiling + headroom | exact bytes | bytes move with dependency patches — reasons the author cannot act on |
+| Visual regression | golden SVG text | screenshot pixel diff | exact, no tolerance, no browser — available only because the seed is stored |
+| Draw failure | quarantine by `id:version` | let it throw / retry N times | one bad element cannot blank the canvas; an edit is a free retry |
+| E2E retries | zero | retry twice | a retried green run hides a suite that is measuring the machine |
 
 ---
 
@@ -1517,5 +1690,9 @@ judgement, not as gaps.
 - [Rough.js](https://roughjs.com/) · [perfect-freehand](https://github.com/steveruizok/perfect-freehand)
 - [pvigier — Quadtree and collision detection](https://pvigier.github.io/2019/08/04/quadtree-collision-detection.html)
 - [Excalidraw source](https://github.com/excalidraw/excalidraw) · [tldraw source](https://github.com/tldraw/tldraw)
+- [React — error boundaries](https://react.dev/reference/react/Component#catching-rendering-errors-with-an-error-boundary)
+- [Playwright — test isolation & trace viewer](https://playwright.dev/docs/browsers)
+- [GitHub Actions — `workflow_run`](https://docs.github.com/actions/reference/events-that-trigger-workflows#workflow_run)
+- [nanoid — the URL alphabet this project's `newId` follows](https://github.com/ai/nanoid)
 
 [mdn-settransform]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/setTransform

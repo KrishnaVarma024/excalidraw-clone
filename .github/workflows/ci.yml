@@ -12,8 +12,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Fast feedback ───────────────────────────────────────────────────────────
+  # Everything that needs no browser, in one job. This is the job people watch,
+  # so nothing slow is allowed to move into it.
   verify:
-    name: typecheck · lint · test · build
+    name: typecheck · lint · test · build · size
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -38,8 +41,60 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Includes the performance budget (tests/budget) and the golden SVG
+      # snapshots (tests/visual). Both are deterministic counts and exact string
+      # comparisons — nothing here reads a clock, so nothing here can fail
+      # because a runner was busy. See ARCHITECTURE §10.1.
       - name: Test
         run: npm run test
 
       - name: Build
         run: npx vite build
+
+      # Hangs off the build rather than living in the test suite, because it
+      # needs dist/ and `npm run verify` has to stay fast enough that people run
+      # it before pushing.
+      - name: Bundle size
+        run: node scripts/checkBundle.mjs
+
+  # ── Integration ─────────────────────────────────────────────────────────────
+  # Separate job, running in parallel: it installs a browser, so it is
+  # structurally slower and must not be in the way of the feedback above. Five
+  # tests covering the seams unit tests cannot reach — mount, pointer input,
+  # IndexedDB round trip, download.
+  e2e:
+    name: end-to-end smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Chromium only, and `--with-deps` for the system libraries the runner
+      # image does not ship. One browser keeps this near a minute; see
+      # playwright.config.ts for why a three-browser matrix is not worth it here.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # playwright.config.ts's webServer builds and serves dist/ — the e2e tests
+      # run against the production bundle, not the dev server.
+      - name: Run smoke tests
+        run: npx playwright test
+
+      # Traces are written only for failures (`trace: 'retain-on-failure'`), so
+      # this uploads nothing on a green run and everything needed to debug a red
+      # one: `npx playwright show-trace` replays the DOM at every step.
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
