@@ -21,48 +21,160 @@ O(log) growths to reach any coordinate.
 
 ## Status
 
-**Phase 9 of 11 — PNG and SVG export.** `drawElement.ts` has carried this comment since Phase 2:
+**Phase 10 of 11 — every claim is a gate.**
 
-> It is also what will let Phase 9 reuse this exact code to render an export at a different scale to
-> an offscreen canvas, with no changes. If export ever needs to modify this file, that is a signal
-> something in here is reading screen state it should not be.
+Nine phases made load-bearing claims. *Culling is sublinear. The dirty-rect merge is bounded. The
+broad phase does the work, not the narrow phase. The engine does not depend on React.* Each one was
+defended by a paragraph in a document and by whoever remembered writing it — a defence with a
+half-life of about one quarter.
 
-**It did not need to be modified. Not one line.** `git diff` on `drawElement.ts` and `roughCache.ts`
-across this PR is empty. The whole PNG exporter is: make a canvas, install a different matrix, call
-`drawElement` in z-order. That is the only kind of proof an architectural rule ever gets.
+This phase turns each claim into a number that fails the build when it moves.
 
-Export is **not** a screenshot. `canvas.toBlob()` on the live canvas gives you the current viewport,
-at the current zoom, with the selection handles in it. Measured in the browser: a drawing on a
-1200×760 screen exports as **396×251** — framed to the content, with no grid and no handles.
+### The gate is a count, not a clock
 
-SVG cannot reuse `drawElement` — there is no 2D context to install a transform on — so it needs a
-second renderer. That would mean two renderers drifting apart, except that **Rough.js hands out the
-geometry, not just the drawing**: `generator.toPaths()` returns the same sketchy path data the canvas
-strokes, from the same `Drawable`, generated from the same stored `seed`. Export the same scene twice
-and the bytes are identical, which is what makes Phase 10's visual-regression testing possible.
+`tests/budget/budget.json` holds 45 numbers: elements the cull examined, quadtree nodes descended,
+broad- and narrow-phase hit candidates, dirty rectangles collected and merged, bytes of serialised
+document, bytes of exported SVG. **43 of them are integer counts of operations** — pure functions of
+the code and a seed, reading identically on a laptop and on a loaded CI runner.
 
-### What an export costs, and what it weighs
+The other two are not, and finding that out is the most useful thing that happened in this phase.
+`bytes.document.*` is the byte size of *serialised floating-point data*, and it drifted by 21 bytes
+in 461 kB between an x86-64 Linux container and an arm64 macOS laptop — the last digits of a
+double-to-string conversion are not stable across V8 builds. They had been asserted exactly anyway,
+because they lived in the same file as the counts and looked like them.
 
-| elements | PNG 1× | PNG 2× | SVG |
-|---:|---|---|---|
-| 1,000 | 1.4 s · 2.13 MB | 5.7 s · 6.69 MB | 5.1 s · **0.66 MB** |
-| 10,000 | 1.8 s · 9.46 MB | 6.6 s · 23.69 MB | 6.9 s · 6.68 MB |
-| 50,000 | 5.1 s · 34.50 MB | **14.1 s** · 80.45 MB | 8.1 s · 33.53 MB |
+So the rule this phase already states about *files* — match the assertion to how deterministic the
+quantity is — turned out to apply **within** one file. Those two keys now carry a ±0.1% tolerance
+with the reason recorded next to it, and the tolerance is defensible because both numbers can be
+stated: observed noise is 0.005%, and the schema growth this counter exists to catch (one extra
+field on the element model) is 3.2%. A factor of ~600 between noise and signal. Verified by adding
+a field: both keys fail, everything else passes.
 
-Two things worth reading off that table. **Export blocks, in seconds** — and unlike Phase 8's
-autosave it cannot be hidden in idle time, because the user is waiting for it. And **PNG scales with
-area while SVG scales with element count**, so SVG is 10× smaller at a thousand elements and roughly
-level by fifty thousand.
+`bytes.svg.*` stayed exact — because Phase 9 rounds path coordinates to two decimals before
+serialising. The rounding that halved the export file also made it machine-independent, which
+nobody planned.
 
-A bug a test found: **the path coordinates were never rounded.** `toPaths` emits full float
-precision — seventeen characters per number — and the rounding helper only reached numbers this code
-formatted itself. Rounding the `d` strings to two decimals (well under a device pixel at any export
-scale) more than halves the file, and it is also what makes the bytes *stable* enough to compare:
+That is why the assertion is **exact equality** rather than a ceiling. A ceiling is silent about
+improvements and drifts upward until it constrains nothing; an exact count turns every change to the
+work this engine does into a line in a diff somebody has to justify:
 
-| elements | unrounded SVG | rounded | |
+```diff
+- "cull.zoomed-in.10000.tested": 505,
++ "cull.zoomed-in.10000.tested": 10000,
+```
+
+Verified by breaking things on purpose. Raising the quadtree's node capacity from 8 to 64 moves
+**7 of the 45** counters and leaves 38 alone — and the failure names each one, so the diff *is* the
+diagnosis.
+
+The bundle budget uses a ceiling instead, deliberately: bytes move when a dependency ships a patch
+release, and an exact assertion there would fail for reasons that are not about this code. **Match
+the assertion to how deterministic the quantity actually is.**
+
+### Visual regression with no browser and no pixel diff
+
+The standard approach is screenshot-and-compare, and it is the reason people hate e2e suites: a font
+hinted differently on the runner, a GPU antialiasing a curve one grey level off, and the fix is a
+tolerance wide enough to hide the regressions you wanted to catch.
+
+This project can skip all of it, because of two decisions made earlier for unrelated reasons —
+Phase 2 stored the Rough.js `seed` instead of regenerating it, and Phase 9's SVG exporter runs with
+no DOM. Together they give a **deterministic textual rendering of the scene**, so the golden file is
+the SVG itself: text, byte-identical everywhere, reviewable in a pull request, no tolerance, no
+flake, 24 ms inside the normal unit-test run.
+
+Changing one `stroke-linecap` in the serialiser fails three of the four golden files — and leaves
+the text one alone, because text has no line caps.
+
+The goldens are stored one element per line. `toSvg` emits a single line, which is right for a file
+a user downloads and wrong for a file a human reviews: on one line, changing a stroke width rewrites
+the whole 24 kB line and git reports "1 insertion, 1 deletion". **A golden file whose diff nobody can
+read gets regenerated instead of read**, and at that point it is a slow way of asserting nothing.
+
+### Two kinds of containment, because there are two boundaries
+
+A React error boundary catches throws during render, in lifecycle methods, and in constructors. It
+does **not** catch them in event handlers, in promises, or in `requestAnimationFrame` callbacks —
+and this engine's entire render loop is a rAF callback running sixty times a second. A throw in
+`drawElement` reaches React never.
+
+So there are two mechanisms:
+
+- **`ErrorBoundary`** for the React tree. When it fires, the one thing that matters is the user's
+  document, so it opens IndexedDB *itself* — a recovery path must not depend on the thing that
+  failed — and offers the last autosave as a file. It never offers to clear storage, because that
+  is one click between the user and the work they came back for.
+- **`DrawGuard`** for the render loop. One element that throws is quarantined and the other 399
+  keep drawing, instead of the loop unwinding and blanking the canvas on every frame forever.
+
+The quarantine is keyed by `id:version` — the same key `RoughCache` uses. That is Phase 2's "never
+mutate in place" invariant paying out a third time: when the user drags the broken element, or
+recolours it, or undoes whatever created it, the key changes and it is retried automatically. The
+retry policy is *"whenever the element changes"*, and it costs one string concatenation.
+
+Measured, because a `try`/`catch` around a hot loop deserves a number rather than an assurance.
+Continuous pan at 10,000 elements — a full repaint every frame, the worst case there is:
+
+| | p50 frame | |
+|---|---:|---|
+| no guard | 61.0 ms | n=8 |
+| guard | 63.2 ms | n=8 |
+
+**+2.2 ms, about 3.6%, with a 95% confidence interval of ±2.1 ms** — barely distinguishable from
+zero at this sample size, and stated that way rather than rounded to "free". The obvious hypothesis
+was the closure allocated per element per frame; a closure-free variant measured 63.7 ms, i.e. no
+better, so the hypothesis was wrong and the generic, testable API stays. In the normal dirty-rect
+path the loop wraps tens of calls rather than ten thousand.
+
+### A bug the budget found that no test was looking for
+
+The serialised-document byte count would not sit still between runs. Nothing else in the suite cared
+about ids; this cared about their total length.
+
+`newId()`'s alphabet was **63 characters, not 64**. nanoid's `_` had been lost. `ALPHABET[63]` was
+therefore `undefined`, and `id += undefined` appends the *string* `"undefined"` rather than throwing
+— so **28% of all element ids contained the literal text `undefined`**, and were 29, 37 or 45
+characters instead of 21.
+
+Nothing broke. Ids are opaque: a longer one is still unique, still a valid `Map` key, still
+round-trips through JSON. `noUncheckedIndexedAccess` typed the read as `string | undefined`, which is
+correct and cannot object to `string += string | undefined`. Every test passed for nine phases. The
+comment directly above the alphabet said it is 64 characters "which is the whole reason it is 64 and
+not, say, 62" — the code had disagreed with its own documentation the entire time.
+
+Fixed, and the invariant is executable now rather than a claim in a comment. It also made every
+saved document smaller:
+
+| elements | document before | after | |
 |---:|---:|---:|---:|
-| 100 | 124.7 kB | **60.2 kB** | 2.07× |
-| 1,000 | 1,461.3 kB | **676.2 kB** | 2.16× |
+| 1,000 | 464,425 B | **461,569 B** | −0.6% |
+| 10,000 | 4,969,013 B | **4,942,445 B** | −0.5% |
+
+**A measurement finds bugs that no assertion was aimed at.** That is most of the argument for
+measuring at all.
+
+### What ships, and what is honestly not covered
+
+CI runs two jobs in parallel: `verify` (typecheck, lint, 590 tests, build, bundle size) and `e2e`
+(five Playwright specs against the **production build**, not the dev server). `main` deploys to
+GitHub Pages only after CI is green — `workflow_run` fires on failure too, so that gate is an
+explicit `if`, and the deploy concurrency group deliberately does *not* cancel in progress, because
+cancelling mid-upload can leave the site serving a half-published build.
+
+`retries: 0` on the e2e suite, and it earned its keep immediately: two of the five specs were racing
+the render loop, failing in a *different* place on each full run while passing in isolation. Retries
+would have hidden that. Both were bugs in the tests — reading canvas pixels before the next animation
+frame, and inferring "the save landed" from a UI label that reads `0.0 ms (pending)`. The fix for the
+second one is the general lesson: **assert the condition, not a rendering of it** — the test now reads
+IndexedDB directly.
+
+Not covered: the `ErrorBoundary` render path has no automated test. Verifying it needs a component
+that throws, which needs either jsdom (which ARCHITECTURE §12 calls a smell for this codebase) or a
+`?crash=1` backdoor shipped in the production bundle. Neither is worth it, so the risky half — the
+document rescue — was extracted into `src/engine/persist/rescue.ts` and unit-tested against a fake
+loader, and the boundary itself was verified by hand: a temporary throw injected into a real build
+rendered the panel and downloaded a file containing the drawing. Closing the gap properly means a
+build-time flag and a second CI build.
 
 <!-- Updated at each phase. Baseline lands in Phase 3, results in Phases 4 and 5. -->
 
@@ -79,7 +191,7 @@ scale) more than halves the file, and it is also what makes the bytes *stable* e
 | 7 | Text | ✅ |
 | 8 | Undo/redo, persistence | ✅ |
 | 9 | PNG and SVG export | ✅ |
-| 10 | Hardening, benchmarks in CI, deploy | — |
+| 10 | Hardening, gates, CI and deploy | ✅ |
 
 Each phase is a pull request with the design reasoning in its description.
 
@@ -213,10 +325,32 @@ npm run dev        # http://localhost:5173
 ```
 
 ```bash
-npm run verify     # typecheck + lint + test — the same gate CI runs
-npm run test       # vitest, Node environment, no jsdom
-npm run bench      # the cull benchmark. seconds, not milliseconds — not part of verify
-npm run build      # typecheck, then production bundle
+npm run verify      # typecheck + lint + test. ~15 s. run this before you push
+npm run verify:full # the above, plus build, bundle size and the browser suite
+npm run test        # vitest, Node environment, no jsdom
+npm run test:e2e    # playwright. builds dist/ and drives the real bundle
+npm run size        # bundle budget. needs a build first
+npm run bench       # the cull benchmark. seconds, not milliseconds — not in verify
+npm run build       # typecheck, then production bundle
+```
+
+Two gates hold checked-in expectations, and both are updated by one command each. Do it
+deliberately, and say why in the commit message — that diff is the review:
+
+```bash
+UPDATE_BUDGET=1 npm test -- tests/budget    # the work counts moved, on purpose
+UPDATE_GOLDEN=1 npm test -- tests/visual    # the renderer output changed, on purpose
+node scripts/checkBundle.mjs --update       # re-record the size ceiling (+10% headroom)
+```
+
+Then **read the diff**. A golden file regenerated without reading it costs the same as one that was
+read, and certifies nothing.
+
+If your environment supplies its own Chromium — an air-gapped runner, a Nix or Docker image, a proxy
+that blocks Playwright's CDN — point at it instead of downloading one:
+
+```bash
+PLAYWRIGHT_CHROMIUM_PATH=/usr/bin/chromium npm run test:e2e
 ```
 
 `bench` is deliberately outside `verify`. Its output is a property of the machine as much as of
@@ -247,12 +381,16 @@ src/
     spatial/       the quadtree. knows about rectangles and ids, nothing else.
     util/          scalar maths, 2D geometry, ids, frame timing, simplification
   react/           the UI chrome. mounts the canvases, then gets out of the way.
-tests/engine/      516 tests, all in Node. ~9s, no jsdom.
+tests/engine/      unit tests, all in Node. no jsdom.
+tests/budget/      the performance gate. exact counts, checked into budget.json.
+tests/visual/      golden SVG snapshots. visual regression with no browser.
+e2e/               five Playwright specs against the production build.
+scripts/           bundle-size budget.
 tests/bench/       vitest bench. run on demand, never in CI.
 ```
 
-Directories arrive with the phase that fills them, rather than as empty placeholders. The target
-structure is in [ARCHITECTURE.md §12](ARCHITECTURE.md).
+Directories arrive with the phase that fills them, rather than as empty placeholders. The annotated
+tree — the real one, not a plan — is [ARCHITECTURE.md §12](ARCHITECTURE.md).
 
 ---
 

@@ -776,3 +776,123 @@ canvas {
   background: rgba(127, 127, 140, 0.14);
   line-height: 1.4;
 }
+
+/* ── Crash panel (Phase 10) ──────────────────────────────────────────────────
+
+   Deliberately plain, and deliberately not using any of the tokens the rest of
+   the app defines. This screen renders when something above it has already
+   failed; taking a dependency on a custom property that some other stylesheet
+   was meant to set is how a recovery UI turns into white text on white. Hard
+   values only, and nothing that needs JavaScript to be correct. */
+
+.crash {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f6f6f8;
+  color: #1b1b1f;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  overflow: auto;
+}
+
+.crash__panel {
+  max-width: 520px;
+  width: 100%;
+  padding: 28px;
+  border: 1px solid #d9d9e0;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 12px 40px rgb(0 0 0 / 8%);
+}
+
+.crash__title {
+  margin: 0 0 12px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.crash__body {
+  margin: 0 0 20px;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #45454f;
+}
+
+.crash__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.crash__button {
+  padding: 9px 16px;
+  border: 1px solid #d9d9e0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #1b1b1f;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.crash__button:hover:not(:disabled) {
+  background: #f2f2f5;
+}
+
+.crash__button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.crash__button--primary {
+  border-color: #5b57d1;
+  background: #5b57d1;
+  color: #ffffff;
+}
+
+.crash__button--primary:hover:not(:disabled) {
+  background: #4a46bd;
+}
+
+.crash__note {
+  margin: 16px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #45454f;
+}
+
+.crash__note--ok {
+  color: #2f7d32;
+}
+
+.crash__note--bad {
+  color: #b3261e;
+}
+
+.crash__details {
+  margin-top: 20px;
+  font-size: 12px;
+  color: #6a6a76;
+}
+
+.crash__details summary {
+  cursor: pointer;
+}
+
+.crash__stack {
+  margin: 10px 0 0;
+  padding: 12px;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: 8px;
+  background: #f2f2f5;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

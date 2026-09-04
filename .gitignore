@@ -11,6 +11,17 @@ dist-ssr/
 coverage/
 *.local
 
+# ── Playwright ───────────────────────────────────────────────────────────────
+# Traces, screenshots and the HTML report, written only when a test fails.
+# Ignored because they are large binary artefacts of ONE run on ONE machine —
+# CI uploads them as an artifact instead, which is where a failing run's
+# evidence belongs. Note that e2e/ itself and the golden SVGs in
+# tests/visual/__golden__/ are NOT ignored: those are source.
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # ── Tooling caches ───────────────────────────────────────────────────────────
 .vite/
 .eslintcache

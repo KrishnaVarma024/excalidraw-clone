@@ -1,0 +1,76 @@
+name: Deploy
+
+# Only from main, and only after CI has gone green on it.
+#
+# `workflow_run` rather than chaining steps onto ci.yml, because deployment is a
+# different concern with different permissions: this job can write to Pages, and
+# CI cannot. Keeping them separate means a change to the test pipeline can never
+# accidentally grant itself deploy rights.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Manual re-deploy, for when the site needs republishing without a commit.
+  workflow_dispatch:
+
+# Least privilege. `contents: read` to check out; `pages` and `id-token` are what
+# the deploy action needs and nothing more. The default token is far broader.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and DO NOT cancel one in progress: cancelling halfway
+# through an upload can leave the site serving a half-published build. Queue
+# instead. This is the one place in this repo where cancel-in-progress is wrong.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # The gate. `workflow_run` fires whether CI passed or failed, so without this
+    # line a red build deploys itself.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # `--base` is set here rather than in vite.config.ts on purpose.
+      #
+      # Pages serves a project site from /<repo>/, so every asset URL needs that
+      # prefix. Putting it in the config would apply it to `vite preview` too,
+      # and the e2e suite — which navigates to `/` — would 404 against a build
+      # that only exists under /excalidraw-clone/. Deployment detail, deployment
+      # file.
+      #
+      # Derived from the repository name rather than hard-coded, so a fork or a
+      # rename deploys correctly with no edit.
+      - name: Build
+        run: npx vite build --base=/${{ github.event.repository.name }}/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -37,8 +37,26 @@ export default tseslint.config(
     rules: reactHooks.configs.recommended.rules,
   },
 
+  /* Node globals for everything that runs OUTSIDE the browser: the test suite,
+     the config files, the build scripts, and the Playwright specs. Kept as an
+     explicit list rather than "everything not in src/" so that adding a new
+     top-level directory is a decision — src/engine/ is deliberately DOM-free
+     but it is not Node either, and giving it `process` by accident is how a
+     `process.env` check ends up shipped to a browser. */
   {
-    files: ['tests/**/*.ts', 'vite.config.ts', 'eslint.config.js'],
+    files: [
+      'tests/**/*.ts',
+      'e2e/**/*.ts',
+      'scripts/**/*.mjs',
+      'vite.config.ts',
+      'playwright.config.ts',
+      'eslint.config.js',
+    ],
     languageOptions: { globals: globals.node },
+    rules: {
+      // These files ARE the console output. `checkBundle.mjs` prints a table;
+      // suppressing that would defeat the script.
+      'no-console': 'off',
+    },
   },
 );

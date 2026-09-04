@@ -31,6 +31,7 @@ import type { ElementId } from '../scene/element.types';
 import { type GridStyle, drawGrid } from './grid';
 import { createRoughCanvas, drawElement } from './drawElement';
 import { RoughCache } from './roughCache';
+import { DrawGuard } from './DrawGuard';
 import type { StageTimer } from '../util/perf';
 import { type RenderPlan, snapToDevicePixels } from './DirtyTracker';
 import type { RoughCanvas } from 'roughjs/bin/canvas';
@@ -67,6 +68,15 @@ export interface RenderStats {
   dirtyCoverage: number;
   /** Whether this frame repainted everything. */
   fullRepaint: boolean;
+  /**
+   * Element revisions currently quarantined after throwing while drawing.
+   *
+   * On the stats overlay rather than in a log, because the symptom the user
+   * reports is "my shape disappeared" and this is the one number that explains
+   * it. Sits at 0 forever in a healthy build — which is exactly why a non-zero
+   * value is worth a line of screen space.
+   */
+  quarantined: number;
 }
 
 export interface Theme {
@@ -96,6 +106,7 @@ export class Renderer {
   private theme: Theme = LIGHT_THEME;
   private readonly rough: RoughCanvas;
   readonly cache = new RoughCache();
+  readonly guard = new DrawGuard();
 
   constructor(
     private readonly ctx: CanvasRenderingContext2D,
@@ -156,13 +167,14 @@ export class Renderer {
     stages.end('cull');
 
     stages.begin('draw');
+    let drawn = 0;
     for (const el of visible) {
       if (el.id === this.hidden) continue;
-      drawElement(ctx, this.rough, this.cache, el);
+      if (this.guard.run(el, () => drawElement(ctx, this.rough, this.cache, el))) drawn++;
     }
     stages.end('draw');
 
-    return this.finish(gridLines, visible.length, 0, 1, true);
+    return this.finish(gridLines, drawn, 0, 1, true);
   }
 
   /* ── partial repaint ────────────────────────────────────────────────────── */
@@ -238,10 +250,9 @@ export class Renderer {
       stages.begin('draw');
       for (const el of overlapping) {
         if (el.id === this.hidden) continue;
-        drawElement(ctx, this.rough, this.cache, el);
+        if (this.guard.run(el, () => drawElement(ctx, this.rough, this.cache, el))) drawn++;
       }
       stages.end('draw');
-      drawn += overlapping.length;
 
       ctx.restore();
     }
@@ -299,6 +310,7 @@ export class Renderer {
       dirtyRects,
       dirtyCoverage,
       fullRepaint,
+      quarantined: this.guard.size,
     };
   }
 }

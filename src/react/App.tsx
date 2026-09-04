@@ -38,17 +38,19 @@ export function App() {
       )}
 
       <div className="badge">
-        <strong>Phase 9 — PNG and SVG export.</strong>
+        <strong>Phase 10 — every claim is a gate.</strong>
         <br />
-        Export is not a screenshot: it frames the <em>content</em>, at a scale you
-        choose, with no handles and no grid. The PNG path reuses{' '}
-        <em>drawElement</em> with <strong>zero changes</strong> — a claim written
-        into that file in Phase 2 and only now cashed. It just installs a different
-        matrix.
+        Nine phases made load-bearing claims. Each one is now an integer in{' '}
+        <em>tests/budget/budget.json</em> that fails the build when it moves —
+        counts, never timings, so a busy CI runner cannot make it red.
         <br />
-        SVG cannot reuse it, so it emits paths — from the <em>same</em> Rough.js
-        drawable, generated from the <em>same</em> stored seed. Export twice and
-        the bytes are identical, which is what makes Phase 10 possible.
+        Visual regression with <strong>no browser and no pixel diff</strong>: the
+        SVG export is deterministic (Phase 2's stored seed, Phase 9's DOM-free
+        serialiser), so the golden file is text you can read in a diff.
+        <br />
+        And containment, in two places, because a React error boundary cannot
+        catch a throw inside <em>requestAnimationFrame</em> — where the whole
+        render loop lives.
       </div>
     </div>
   );

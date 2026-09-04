@@ -21,8 +21,43 @@
  * above only holds for a uniform source.
  */
 
-const ALPHABET = 'useandom-26T198340PX75pxJACKVERYMINDBUSHWOLFGQZbfghjklqvwyzrict';
+const ALPHABET = 'useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict';
 const ID_LENGTH = 21;
+
+/**
+ * The alphabet must be exactly 64 characters, and this checks it at import.
+ *
+ * ── Why an assertion and not a comment ──────────────────────────────────────
+ *
+ * It was 63 for nine phases. The `_` between `WOLF` and `GQZ` was lost at some
+ * point, and the consequence was invisible in every way a bug can be:
+ *
+ *   - `ALPHABET[63]` is `undefined`, and `id += undefined` appends the *string*
+ *     `"undefined"` rather than throwing. JavaScript's implicit conversion turns
+ *     an out-of-bounds read into a nine-character token.
+ *   - So ~28% of ids contained the literal text `undefined`, and were 29, 37 or
+ *     45 characters instead of 21.
+ *   - Nothing broke. Ids are opaque; a longer id is still unique, still a valid
+ *     Map key, still round-trips through JSON. Every test passed.
+ *   - `noUncheckedIndexedAccess` is on, and typed the read as `string |
+ *     undefined` — correctly. It cannot object to `string += string | undefined`,
+ *     because that is legal TypeScript.
+ *
+ * Found in Phase 10, by a *byte budget* on the serialised document: the number
+ * would not sit still between runs. Nothing was looking at ids; something was
+ * looking at their total length. **A measurement finds bugs that no assertion
+ * was aimed at**, which is most of the argument for measuring at all.
+ *
+ * The comment eight lines above already said the alphabet is 64 characters
+ * "which is the whole reason it is 64 and not, say, 62". The code disagreed with
+ * its own documentation for nine phases and neither noticed. So the invariant is
+ * executable now.
+ */
+if (ALPHABET.length !== 64) {
+  throw new Error(
+    `id alphabet must be exactly 64 characters for the &63 mask to be total; got ${ALPHABET.length}`,
+  );
+}
 
 /** Generate a URL-safe, collision-resistant element id. */
 export function newId(): string {
@@ -31,10 +66,12 @@ export function newId(): string {
 
   let id = '';
   for (let i = 0; i < ID_LENGTH; i++) {
-    // 63 = 0b111111, so this maps each byte onto the 64-char alphabet with no
-    // modulo bias (the alphabet length is a power of two, which is the whole
-    // reason it is 64 characters and not, say, 62).
-    id += ALPHABET[bytes[i]! & 63];
+    /* 63 = 0b111111, so this maps each byte onto the 64-char alphabet with no
+       modulo bias — the alphabet length being a power of two is the whole reason
+       it is 64 and not, say, 62. The mask is only *total* if the alphabet really
+       has 64 entries, which is why that is asserted at import above rather than
+       left as a claim in this comment. */
+    id += ALPHABET[bytes[i]! & 63]!;
   }
   return id;
 }

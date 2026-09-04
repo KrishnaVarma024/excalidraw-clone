@@ -248,6 +248,7 @@ export class Engine {
     nodes: 0,
     path: 'all',
     cacheHitRate: 1,
+    quarantined: 0,
     dirtyRects: 0,
     dirtyCoverage: 1,
     fullRepaint: true,
@@ -720,6 +721,7 @@ export class Engine {
     this.scene.clear();
     this.scene.compact();
     this.renderer.cache.clear();
+    this.renderer.guard.clear();
     this.selection.clear();
     this.selectionBoundsDirty = true;
     this.refreshSnapshot();
@@ -752,6 +754,7 @@ export class Engine {
     const { elements, descriptor } = generateScene(options);
     this.scene.load(elements);
     this.renderer.cache.clear();
+    this.renderer.guard.clear();
     this.zoomToFit();
     this.markDirty();
     this.refreshSnapshot();
@@ -1069,6 +1072,13 @@ export class Engine {
       this.scene.load(result.elements);
       this.viewport.restore(result.appState);
     });
+
+    /* A restored document is precisely the case DrawGuard exists for — elements
+       that passed validation but may still be malformed in a way no rule names.
+       Clearing here means a reload retries everything rather than inheriting a
+       quarantine from whatever the previous document did. */
+    this.renderer.cache.clear();
+    this.renderer.guard.clear();
 
     this.dirty.force('global');
     this.needsStaticRender = true;
